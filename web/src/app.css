@@ -75,6 +75,7 @@ input, select {
   background: transparent;
 }
 .btn-ghost:hover { background: var(--surface2); color: var(--text); }
+.btn:disabled, .btn[disabled] { opacity: 0.4; cursor: default; pointer-events: none; }
 
 .btn-danger {
   background: var(--danger);

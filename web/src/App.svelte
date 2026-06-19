@@ -18,6 +18,8 @@
   let loading = true
   let searchActive = false
   let searchTimer
+  let history = []
+  let historyIdx = -1
 
   isAuthenticated.subscribe(v => authed = v)
 
@@ -59,6 +61,8 @@
       isAuthenticated.set(true)
       notify('登录成功', 'success')
       loadDir('')
+      history = ['']
+      historyIdx = 0
     } catch (e) {
       throw e
     }
@@ -72,6 +76,17 @@
   }
 
   function handleNavigate(path) {
+    currentPath.set(path)
+    loadDir(path)
+    history = history.slice(0, historyIdx + 1)
+    history.push(path)
+    historyIdx = history.length - 1
+  }
+
+  function goBack() {
+    if (historyIdx <= 0) return
+    historyIdx--
+    const path = history[historyIdx]
     currentPath.set(path)
     loadDir(path)
   }
@@ -211,7 +226,12 @@
     </header>
 
     <div class="toolbar">
-      <Breadcrumb currentPath={$currentPath} on:navigate={e => handleNavigate(e.detail)} />
+      <div class="toolbar-left">
+        <button class="btn btn-ghost btn-sm" on:click={goBack} disabled={historyIdx <= 0} title="返回上一页">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <Breadcrumb currentPath={$currentPath} on:navigate={e => handleNavigate(e.detail)} />
+      </div>
       <div class="toolbar-actions">
         <button class="btn btn-ghost btn-sm" on:click={() => handleNewFolder(prompt('文件夹名称：') || '')}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
@@ -390,13 +410,19 @@
   .toolbar {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     padding: 8px 16px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-    gap: 12px;
+    gap: 8px;
     flex-wrap: wrap;
+  }
+  .toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
   }
 
   .toolbar-actions {
