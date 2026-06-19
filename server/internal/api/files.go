@@ -1,0 +1,381 @@
+package api
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/zhangjh/mini-nas/server/internal/model"
+	"github.com/zhangjh/mini-nas/server/internal/service"
+)
+
+type FileHandler struct {
+	fileSvc  *service.FileService
+	thumbSvc *service.ThumbnailService
+}
+
+func NewFileHandler(fileSvc *service.FileService, thumbSvc *service.ThumbnailService) *FileHandler {
+	return &FileHandler{fileSvc: fileSvc, thumbSvc: thumbSvc}
+}
+
+func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	sortBy := r.URL.Query().Get("sort_by")
+	sortDesc := r.URL.Query().Get("sort_desc") == "true"
+
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 0
+	}
+
+	fl, err := h.fileSvc.ListDir(path, page, pageSize, sortBy, sortDesc)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: fl})
+}
+
+func (h *FileHandler) Info(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	info, err := h.fileSvc.GetFileInfo(path)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, model.APIResponse{
+			OK: false, Error: "file not found",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: info})
+}
+
+func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = r.FormValue("path")
+	}
+
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "invalid multipart form",
+		})
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "missing file field",
+		})
+		return
+	}
+	defer file.Close()
+
+	targetPath := filepath.Join(path, header.Filename)
+	written, err := h.fileSvc.WriteFile(targetPath, file)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, model.APIResponse{
+		OK: true,
+		Data: map[string]interface{}{
+			"size":  written,
+			"path":  targetPath,
+			"name":  header.Filename,
+		},
+	})
+}
+
+func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	f, err := h.fileSvc.OpenFile(path)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, model.APIResponse{
+			OK: false, Error: "file not found",
+		})
+		return
+	}
+	defer f.Close()
+
+	info, _ := f.Stat()
+	name := filepath.Base(path)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	io.Copy(w, f)
+}
+
+func (h *FileHandler) Preview(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	f, err := h.fileSvc.OpenFile(path)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, model.APIResponse{
+			OK: false, Error: "file not found",
+		})
+		return
+	}
+	defer f.Close()
+
+	info, _ := f.Stat()
+	mime := detectMimeType(path)
+	w.Header().Set("Content-Type", mime)
+
+	if isVideo(mime) || isAudio(mime) || mime == "application/pdf" {
+		http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
+		return
+	}
+
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	io.Copy(w, f)
+}
+
+func (h *FileHandler) Thumbnail(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	absPath := h.fileSvc.AbsPath(path)
+
+	thumbPath, err := h.thumbSvc.GetThumbnail(absPath)
+	if err != nil || thumbPath == "" {
+		writeJSON(w, http.StatusNotFound, model.APIResponse{
+			OK: false, Error: "thumbnail not available",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, thumbPath)
+}
+
+func (h *FileHandler) Mkdir(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "invalid request",
+		})
+		return
+	}
+	if err := h.fileSvc.Mkdir(req.Path); err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
+}
+
+func (h *FileHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "invalid request",
+		})
+		return
+	}
+	if err := h.fileSvc.Delete(req.Path); err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
+}
+
+func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path    string `json:"path"`
+		NewName string `json:"new_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "invalid request",
+		})
+		return
+	}
+	dir := filepath.Dir(req.Path)
+	newPath := filepath.Join(dir, req.NewName)
+	if err := h.fileSvc.Rename(req.Path, newPath); err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
+}
+
+func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Paths []string `json:"paths"`
+		Dest  string   `json:"dest"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "invalid request",
+		})
+		return
+	}
+	if err := h.fileSvc.Move(req.Paths, req.Dest); err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
+}
+
+func (h *FileHandler) Copy(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Paths []string `json:"paths"`
+		Dest  string   `json:"dest"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "invalid request",
+		})
+		return
+	}
+	if err := h.fileSvc.Copy(req.Paths, req.Dest); err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
+}
+
+func (h *FileHandler) Search(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	path := r.URL.Query().Get("path")
+	if q == "" {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "missing query parameter q",
+		})
+		return
+	}
+
+	results := h.fileSvc.Search(q, path)
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: results})
+}
+
+type DirEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+func (h *FileHandler) ListSystemDirs(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = "/"
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+
+	var dirs []DirEntry
+	for _, entry := range entries {
+		if entry.IsDir() {
+			name := entry.Name()
+			if name == "." || name == ".." {
+				continue
+			}
+			dirPath := pathJoin(path, name)
+			dirs = append(dirs, DirEntry{Name: name, Path: dirPath})
+		}
+	}
+
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: dirs})
+}
+
+func pathJoin(base, name string) string {
+	if base == "/" {
+		return "/" + name
+	}
+	return base + "/" + name
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func detectMimeType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".svg":
+		return "image/svg+xml"
+	case ".mp4":
+		return "video/mp4"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mov":
+		return "video/quicktime"
+	case ".webm":
+		return "video/webm"
+	case ".pdf":
+		return "application/pdf"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".wav":
+		return "audio/wav"
+	case ".flac":
+		return "audio/flac"
+	case ".ogg":
+		return "audio/ogg"
+	case ".aac":
+		return "audio/aac"
+	case ".txt", ".md":
+		return "text/plain; charset=utf-8"
+	case ".log":
+		return "text/plain; charset=utf-8"
+	case ".json":
+		return "application/json"
+	case ".xml":
+		return "application/xml"
+	case ".csv":
+		return "text/csv; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func isVideo(mime string) bool {
+	return len(mime) >= 6 && mime[:6] == "video/"
+}
+
+func isAudio(mime string) bool {
+	return len(mime) >= 6 && mime[:6] == "audio/"
+}

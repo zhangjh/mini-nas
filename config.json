@@ -1,0 +1,7 @@
+{
+  "port": 8080,
+  "data_dir": "./data",
+  "upload_dir": "data/files",
+  "jwt_secret": "fd93814d50fac5f3948b5a6c42432475fcb2858536249c1c38acac783416fef1",
+  "password": "testpass"
+}
