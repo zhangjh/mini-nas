@@ -1,5 +1,6 @@
 package com.mininas.client.ui.files
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -70,6 +71,7 @@ fun FileList(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FileGrid(
     items: List<FileInfo>,
@@ -105,6 +107,7 @@ fun FileGrid(
 
 enum class FileMenuAction { RENAME, DELETE, DOWNLOAD, MOVE }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FileRow(
     file: FileInfo,
@@ -160,6 +163,7 @@ private fun FileRow(
     }
 }
 
+@ExperimentalFoundationApi
 @Composable
 private fun FileGridCell(
     file: FileInfo,

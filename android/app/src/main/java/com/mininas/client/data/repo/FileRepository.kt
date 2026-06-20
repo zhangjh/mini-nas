@@ -10,12 +10,12 @@ import com.mininas.client.data.api.Mount
 import com.mininas.client.data.api.MoveCopyRequest
 import com.mininas.client.data.api.RenameRequest
 import com.mininas.client.data.api.UpdateMountRequest
-import okhttp3.MediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
 import okio.Buffer
 import okio.BufferedSink
-import okio.ForwardingSource
+import okio.ForwardingSink
 import okio.buffer
 import java.io.File
 
@@ -48,7 +48,7 @@ class FileRepository(
         mimeType: String? = null,
         onProgress: ((Float) -> Unit)? = null,
     ) {
-        val mediaType = mimeType?.let { MediaType.parse(it) }
+        val mediaType = mimeType?.toMediaTypeOrNull()
         val rawBody = RequestBody.create(mediaType, file)
         val body = if (onProgress != null) ProgressRequestBody(rawBody, onProgress) else rawBody
         val part = MultipartBody.Part.createFormData("file", file.name, body)
@@ -90,7 +90,7 @@ class FileRepository(
 
 /**
  * RequestBody wrapper that reports upload progress as a 0..1 float. OkHttp
- * reads the source in chunks; we count bytes read and invoke the callback.
+ * writes the content to the sink; we wrap the sink to count bytes.
  */
 private class ProgressRequestBody(
     private val delegate: RequestBody,
@@ -102,18 +102,18 @@ private class ProgressRequestBody(
 
     override fun writeTo(sink: BufferedSink) {
         val total = contentLength()
-        val countingSource = object : ForwardingSource(delegate.source()) {
-            var sent = 0L
-            override fun read(sink: Buffer, byteCount: Long): Long {
-                val read = super.read(sink, byteCount)
-                if (read > 0) {
-                    sent += read
-                    val p = if (total > 0) sent.toFloat() / total else 0f
-                    onProgress(p.coerceIn(0f, 1f))
-                }
-                return read
+        val countingSink = object : ForwardingSink(sink) {
+            private var bytesWritten = 0L
+
+            override fun write(source: Buffer, byteCount: Long) {
+                super.write(source, byteCount)
+                bytesWritten += byteCount
+                val p = if (total > 0) bytesWritten.toFloat() / total else 0f
+                onProgress(p.coerceIn(0f, 1f))
             }
-        }
-        sink.writeAll(countingSource.buffer())
+        }.buffer()
+
+        delegate.writeTo(countingSink)
+        countingSink.flush()
     }
 }

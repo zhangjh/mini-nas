@@ -10,6 +10,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
+private val Color0F1416 = androidx.compose.ui.graphics.Color(0xFF0F1416)
+
 private val LightColors = lightColorScheme(
     primary = Primary,
     onPrimary = Surface,
@@ -37,8 +39,6 @@ private val DarkColors = darkColorScheme(
     outline = BorderDark,
     error = Error,
 )
-
-private val Color0F1416 = androidx.compose.ui.graphics.Color(0xFF0F1416)
 
 private val AppTypography = Typography(
     titleLarge = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold),
