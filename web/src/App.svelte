@@ -4,7 +4,7 @@
     sortBy, sortDesc, viewMode, selectedFiles, showUpload, showNewFolder,
     previewFile, searchQuery, searchResults, showSettings, notify } from './lib/stores.js'
   import { setToken, getToken, listFiles, login as apiLogin,
-    mkdir, deleteFile, renameFile, uploadFile, downloadFile,
+    register as apiRegister, mkdir, deleteFile, renameFile, uploadFile, downloadFile,
     searchFiles, healthCheck } from './lib/api.js'
   import LoginForm from './components/LoginForm.svelte'
   import Breadcrumb from './components/Breadcrumb.svelte'
@@ -28,6 +28,9 @@
       try {
         await healthCheck()
         isAuthenticated.set(true)
+        loadDir('')
+        history = ['']
+        historyIdx = 0
       } catch {
         setToken(null)
         isAuthenticated.set(false)
@@ -54,12 +57,26 @@
     $isLoading = false
   }
 
-  async function handleLogin(password) {
+  async function handleLogin(username, password) {
     try {
-      const data = await apiLogin(password)
+      const data = await apiLogin(username, password)
       setToken(data.token)
       isAuthenticated.set(true)
       notify('登录成功', 'success')
+      loadDir('')
+      history = ['']
+      historyIdx = 0
+    } catch (e) {
+      throw e
+    }
+  }
+
+  async function handleRegister(username, password) {
+    try {
+      const data = await apiRegister(username, password)
+      setToken(data.token)
+      isAuthenticated.set(true)
+      notify('注册成功', 'success')
       loadDir('')
       history = ['']
       historyIdx = 0
@@ -193,7 +210,7 @@
     <div class="spinner"></div>
   </div>
 {:else if !authed}
-  <LoginForm onLogin={handleLogin} />
+  <LoginForm onLogin={handleLogin} onRegister={handleRegister} />
 {:else}
   <div class="app">
     <header class="header">

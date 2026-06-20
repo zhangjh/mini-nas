@@ -2,7 +2,7 @@ server/mini-nas-server
 server/data/
 server/*.tmp
 *.log
-data/
+/data/
 .DS_Store
 Thumbs.db
 node_modules/
@@ -16,3 +16,17 @@ server/cmd/server/web/
 *.swp
 *.swo
 *~
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/*.apk
+android/*.aab
+android/*.ap_
+android/*.dex
+android/captures/
+android/.cxx/
+*.keystore
+*.jks

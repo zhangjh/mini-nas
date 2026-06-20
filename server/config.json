@@ -2,6 +2,5 @@
   "port": 8080,
   "data_dir": "./data",
   "upload_dir": "data/files",
-  "jwt_secret": "1792a26abd4f4f6315644d151d1b6e913b764e6ac83c29ffe77d5ec400a0bacf",
-  "password": "zhangjh"
+  "jwt_secret": "1792a26abd4f4f6315644d151d1b6e913b764e6ac83c29ffe77d5ec400a0bacf"
 }

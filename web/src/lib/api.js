@@ -45,10 +45,20 @@ async function request(method, path, opts = {}) {
   return res
 }
 
-export function login(password) {
+export function login(username, password) {
   return request('POST', '/auth/login', {
-    body: JSON.stringify({ password })
+    body: JSON.stringify({ username, password })
   })
+}
+
+export function register(username, password) {
+  return request('POST', '/auth/register', {
+    body: JSON.stringify({ username, password })
+  })
+}
+
+export function authStatus() {
+  return request('GET', '/auth/status')
 }
 
 export function listFiles(path, opts = {}) {

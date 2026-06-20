@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -16,11 +18,12 @@ func NewAuthMiddleware(secret string) *AuthMiddleware {
 	return &AuthMiddleware{JWTSecret: []byte(secret)}
 }
 
-func (m *AuthMiddleware) GenerateToken() (string, int64, error) {
+func (m *AuthMiddleware) GenerateToken(username string) (string, int64, error) {
 	expiresAt := time.Now().Add(72 * time.Hour)
 	claims := jwt.MapClaims{
-		"exp": expiresAt.Unix(),
-		"iat": time.Now().Unix(),
+		"exp":      expiresAt.Unix(),
+		"iat":      time.Now().Unix(),
+		"username": username,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	t, err := token.SignedString(m.JWTSecret)
@@ -28,10 +31,23 @@ func (m *AuthMiddleware) GenerateToken() (string, int64, error) {
 }
 
 func (m *AuthMiddleware) VerifyToken(tokenStr string) bool {
+	_, err := m.ParseToken(tokenStr)
+	return err == nil
+}
+
+func (m *AuthMiddleware) ParseToken(tokenStr string) (string, error) {
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
 		return m.JWTSecret, nil
 	})
-	return err == nil && token.Valid
+	if err != nil || !token.Valid {
+		return "", fmt.Errorf("invalid token")
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", fmt.Errorf("invalid claims")
+	}
+	username, _ := claims["username"].(string)
+	return username, nil
 }
 
 func (m *AuthMiddleware) Handler(next http.Handler) http.Handler {
@@ -48,14 +64,23 @@ func (m *AuthMiddleware) Handler(next http.Handler) http.Handler {
 			})
 			return
 		}
-		if !m.VerifyToken(token) {
+		username, err := m.ParseToken(token)
+		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"ok": false, "error": "invalid token",
 			})
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), usernameKey{}, username)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+type usernameKey struct{}
+
+func UsernameFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(usernameKey{}).(string)
+	return v
 }
 
 func CORSMiddleware(next http.Handler) http.Handler {

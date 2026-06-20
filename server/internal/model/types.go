@@ -26,13 +26,31 @@ type Mount struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
+type User struct {
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	PasswordHash string `json:"password_hash"`
+	CreatedAt    int64  `json:"created_at"`
+}
+
 type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type RegisterRequest struct {
+	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
 type LoginResponse struct {
 	Token     string `json:"token"`
 	ExpiresAt int64  `json:"expires_at"`
+	Username  string `json:"username"`
+}
+
+type AuthStatus struct {
+	HasUsers bool `json:"has_users"`
 }
 
 type APIResponse struct {

@@ -21,7 +21,6 @@ func main() {
 	configPath := flag.String("config", "config.json", "path to configuration file")
 	port := flag.Int("port", 0, "port to listen on")
 	dataDir := flag.String("data", "", "data directory path")
-	password := flag.String("password", "", "set or override login password")
 	flag.Parse()
 
 	absConfigPath := *configPath
@@ -42,20 +41,18 @@ func main() {
 		cfg.DataDir = *dataDir
 		cfg.UploadDir = filepath.Join(cfg.DataDir, "files")
 	}
-	if *password != "" {
-		cfg.Password = *password
-	}
 
 	if err := cfg.Save(absConfigPath); err != nil {
 		log.Printf("Warning: could not save config: %v", err)
 	}
 
 	mountSvc := service.NewMountService(cfg.DBPath())
+	userSvc := service.NewUserService(cfg.DBPath())
 
 	fileSvc := service.NewFileService(mountSvc)
 	thumbSvc := service.NewThumbnailService(cfg.ThumbCacheDir())
 
-	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc)
+	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc, userSvc)
 	staticSrv := spaFallback(staticHandler())
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

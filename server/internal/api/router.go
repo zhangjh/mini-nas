@@ -9,7 +9,7 @@ import (
 	"github.com/zhangjh/mini-nas/server/internal/service"
 )
 
-func NewRouter(cfg *config.Config, fileSvc *service.FileService, thumbSvc *service.ThumbnailService, mountSvc *service.MountService) http.Handler {
+func NewRouter(cfg *config.Config, fileSvc *service.FileService, thumbSvc *service.ThumbnailService, mountSvc *service.MountService, userSvc *service.UserService) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)
@@ -24,11 +24,13 @@ func NewRouter(cfg *config.Config, fileSvc *service.FileService, thumbSvc *servi
 	})
 
 	authM := NewAuthMiddleware(cfg.JWTSecret)
-	authH := NewAuthHandler(authM, cfg.Password)
+	authH := NewAuthHandler(authM, userSvc)
 	fileH := NewFileHandler(fileSvc, thumbSvc)
 	mountH := NewMountHandler(mountSvc)
 
+	r.Get("/api/auth/status", authH.Status)
 	r.Post("/api/auth/login", authH.Login)
+	r.Post("/api/auth/register", authH.Register)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(authM.Handler)

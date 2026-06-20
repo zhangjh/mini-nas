@@ -15,7 +15,6 @@ type Config struct {
 	DataDir   string `json:"data_dir"`
 	UploadDir string `json:"upload_dir"`
 	JWTSecret string `json:"jwt_secret"`
-	Password  string `json:"password"`
 }
 
 func (c *Config) ThumbCacheDir() string {
@@ -44,11 +43,6 @@ func Load(path string) (*Config, error) {
 	if cfg.JWTSecret == "" {
 		cfg.JWTSecret = generateRandomString(32)
 		log.Println("Generated new JWT secret")
-	}
-	if cfg.Password == "" {
-		cfg.Password = generateRandomString(8)
-		log.Printf("Generated default password: %s", cfg.Password)
-		fmt.Printf("\n  >>> Default password: %s <<<\n\n", cfg.Password)
 	}
 
 	cfg.ensureDirs()

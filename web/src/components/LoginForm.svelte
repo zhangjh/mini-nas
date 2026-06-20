@@ -1,20 +1,48 @@
 <script>
-  export let onLogin = async () => {}
+  import { onMount } from 'svelte'
+  import { authStatus } from '../lib/api.js'
 
+  export let onLogin = async (username, password) => {}
+  export let onRegister = async (username, password) => {}
+
+  let username = ''
   let password = ''
   let loading = false
   let error = ''
+  let mode = 'login' // 'login' | 'register'
+  let needsSetup = false
+  let checking = true
+
+  onMount(async () => {
+    try {
+      const status = await authStatus()
+      needsSetup = !status.has_users
+      if (needsSetup) mode = 'register'
+    } catch {
+      // ignore, default to login
+    }
+    checking = false
+  })
 
   async function submit() {
-    if (!password) return
+    if (!username || !password) return
     loading = true
     error = ''
     try {
-      await onLogin(password)
+      if (mode === 'register') {
+        await onRegister(username, password)
+      } else {
+        await onLogin(username, password)
+      }
     } catch (e) {
-      error = e.message || '登录失败'
+      error = e.message || (mode === 'register' ? '注册失败' : '登录失败')
     }
     loading = false
+  }
+
+  function switchMode() {
+    mode = mode === 'login' ? 'register' : 'login'
+    error = ''
   }
 </script>
 
@@ -28,23 +56,50 @@
       </svg>
     </div>
     <h2>mini-nas</h2>
-    <p class="subtitle">轻量级文件同步系统</p>
-    <form on:submit|preventDefault={submit}>
-      <div class="field">
-        <input
-          type="password"
-          placeholder="请输入密码"
-          bind:value={password}
-          disabled={loading}
-        />
-      </div>
-      {#if error}
-        <div class="error">{error}</div>
+    <p class="subtitle">
+      {#if checking}
+        正在加载...
+      {:else if needsSetup && mode === 'register'}
+        首次使用，请创建管理员账号
+      {:else if mode === 'register'}
+        注册新账号
+      {:else}
+        轻量级文件同步系统
       {/if}
-      <button type="submit" class="btn btn-primary login-btn" disabled={loading}>
-        {loading ? '登录中...' : '登录'}
-      </button>
-    </form>
+    </p>
+    {#if !checking}
+      <form on:submit|preventDefault={submit}>
+        <div class="field">
+          <input
+            type="text"
+            placeholder="用户名"
+            bind:value={username}
+            disabled={loading}
+            autocomplete="username"
+          />
+        </div>
+        <div class="field">
+          <input
+            type="password"
+            placeholder="密码"
+            bind:value={password}
+            disabled={loading}
+            autocomplete={mode === 'register' ? 'new-password' : 'current-password'}
+          />
+        </div>
+        {#if error}
+          <div class="error">{error}</div>
+        {/if}
+        <button type="submit" class="btn btn-primary login-btn" disabled={loading || !username || !password}>
+          {loading ? (mode === 'register' ? '注册中...' : '登录中...') : (mode === 'register' ? '注册' : '登录')}
+        </button>
+      </form>
+      {#if !needsSetup}
+        <button class="switch-mode" on:click={switchMode} disabled={loading}>
+          {mode === 'login' ? '没有账号？去注册' : '已有账号？去登录'}
+        </button>
+      {/if}
+    {/if}
   </div>
 </div>
 
@@ -82,6 +137,7 @@
     color: var(--text2);
     font-size: 0.9rem;
     margin-bottom: 24px;
+    min-height: 1.2em;
   }
 
   .field {
@@ -93,6 +149,19 @@
     justify-content: center;
     padding: 12px;
     font-size: 1rem;
+  }
+
+  .switch-mode {
+    margin-top: 16px;
+    background: none;
+    border: none;
+    color: var(--primary);
+    font-size: 0.85rem;
+    cursor: pointer;
+    padding: 4px;
+  }
+  .switch-mode:hover {
+    text-decoration: underline;
   }
 
   .error {

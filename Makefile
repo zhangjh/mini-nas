@@ -3,7 +3,7 @@
 dev: dev-server dev-web
 
 dev-server:
-	cd server && go run ./cmd/server -password mini-nas
+	cd server && go run ./cmd/server
 
 dev-web:
 	cd web && npm run dev
