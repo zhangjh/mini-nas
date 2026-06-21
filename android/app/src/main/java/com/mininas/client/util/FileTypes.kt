@@ -52,9 +52,9 @@ object FormatUtil {
         return "%.2f GB".format(gb)
     }
 
-    fun time(epochSeconds: Long): String {
-        if (epochSeconds <= 0) return ""
-        return dateFmt.format(Date(epochSeconds * 1000))
+    fun time(epochMillis: Long): String {
+        if (epochMillis <= 0) return ""
+        return dateFmt.format(Date(epochMillis))
     }
 }
 

@@ -204,10 +204,11 @@ private fun SyncTaskCard(
                 Text(
                     when (p.phase) {
                         TaskProgress.Phase.IDLE -> "未开始"
-                        TaskProgress.Phase.SCANNING -> "扫描中…"
+                        TaskProgress.Phase.SCANNING -> p.message.ifBlank { "扫描中…" }
                         TaskProgress.Phase.UPLOADING ->
-                            "上传 ${p.current}/${p.total} · ${p.currentFile} (${(p.fileProgress * 100).toInt()}%)"
-                        TaskProgress.Phase.DONE -> "完成：成功 ${p.succeeded}，失败 ${p.failed}"
+                            "上传 ${p.current}/${p.total} · ${p.currentFile} (${(p.fileProgress * 100).toInt()}%)" +
+                                if (p.skipped > 0) " · 已跳过 ${p.skipped}" else ""
+                        TaskProgress.Phase.DONE -> "完成：成功 ${p.succeeded}，跳过 ${p.skipped}，失败 ${p.failed}"
                         TaskProgress.Phase.FAILED -> "失败：${p.message}"
                         TaskProgress.Phase.CANCELLED -> "已取消"
                     },
@@ -231,11 +232,15 @@ private fun HistoryRow(h: SyncHistoryEntry) {
             Text(
                 "${h.status} · ${FormatUtil.size(h.size)}",
                 style = MaterialTheme.typography.labelSmall,
-                color = if (h.status == "success") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                color = when (h.status) {
+                    "success" -> MaterialTheme.colorScheme.primary
+                    "skipped" -> MaterialTheme.colorScheme.tertiary
+                    else -> MaterialTheme.colorScheme.error
+                },
             )
         }
         Text(
-            FormatUtil.time(h.timestamp / 1000),
+            FormatUtil.time(h.timestamp),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

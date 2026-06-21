@@ -65,11 +65,11 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 30 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

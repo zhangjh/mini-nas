@@ -1,5 +1,7 @@
 package com.mininas.client.data.repo
 
+import android.content.ContentResolver
+import android.net.Uri
 import com.mininas.client.data.api.ApiProvider
 import com.mininas.client.data.api.CreateMountRequest
 import com.mininas.client.data.api.DeleteRequest
@@ -10,6 +12,7 @@ import com.mininas.client.data.api.Mount
 import com.mininas.client.data.api.MoveCopyRequest
 import com.mininas.client.data.api.RenameRequest
 import com.mininas.client.data.api.UpdateMountRequest
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
@@ -18,6 +21,7 @@ import okio.BufferedSink
 import okio.ForwardingSink
 import okio.buffer
 import java.io.File
+import java.io.IOException
 
 /**
  * High-level wrapper around [com.mininas.client.data.api.ApiService] for
@@ -39,6 +43,18 @@ class FileRepository(
 
     suspend fun getFileInfo(path: String): FileInfo = api.getFileInfo(path).unwrap()
 
+    /**
+     * Returns the [FileInfo] for [path], or null if the file does not exist
+     * on the server. Network/other errors still throw.
+     */
+    suspend fun getFileInfoOrNull(path: String): FileInfo? {
+        return try {
+            api.getFileInfo(path).unwrap()
+        } catch (e: retrofit2.HttpException) {
+            if (e.code() == 404) null else throw e
+        }
+    }
+
     suspend fun search(q: String, path: String? = null): List<FileInfo> =
         api.searchFiles(q, path).unwrap()
 
@@ -52,6 +68,26 @@ class FileRepository(
         val rawBody = RequestBody.create(mediaType, file)
         val body = if (onProgress != null) ProgressRequestBody(rawBody, onProgress) else rawBody
         val part = MultipartBody.Part.createFormData("file", file.name, body)
+        api.uploadFile(path, part).unwrap()
+    }
+
+    /**
+     * 直接从 [uri] 流式上传，避免把文件先拷贝到临时文件造成磁盘/内存占用暴涨。
+     * [size] 来自 SAF 的 DocumentFile.length()，用于 Content-Length 与进度计算。
+     */
+    suspend fun uploadFile(
+        path: String,
+        contentResolver: ContentResolver,
+        uri: Uri,
+        fileName: String,
+        size: Long,
+        mimeType: String? = null,
+        onProgress: ((Float) -> Unit)? = null,
+    ) {
+        val mediaType = mimeType?.toMediaTypeOrNull()
+        val rawBody = InputStreamRequestBody(contentResolver, uri, size, mediaType)
+        val body = if (onProgress != null) ProgressRequestBody(rawBody, onProgress) else rawBody
+        val part = MultipartBody.Part.createFormData("file", fileName, body)
         api.uploadFile(path, part).unwrap()
     }
 
@@ -115,5 +151,35 @@ private class ProgressRequestBody(
 
         delegate.writeTo(countingSink)
         countingSink.flush()
+    }
+}
+
+/**
+ * 直接从 ContentResolver 打开的 [uri] 流式读取内容，避免把整个文件
+ * 先拷贝到临时文件。OkHttp 在重试时会再次调用 [writeTo]，因此每次
+ * 调用都重新打开 InputStream。
+ */
+private class InputStreamRequestBody(
+    private val contentResolver: ContentResolver,
+    private val uri: Uri,
+    private val size: Long,
+    private val mediaType: MediaType?,
+) : RequestBody() {
+
+    override fun contentType(): MediaType? = mediaType
+
+    override fun contentLength(): Long = size
+
+    override fun writeTo(sink: BufferedSink) {
+        val input = contentResolver.openInputStream(uri)
+            ?: throw IOException("无法打开输入流: $uri")
+        input.use { stream ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = stream.read(buffer)
+                if (read == -1) break
+                sink.write(buffer, 0, read)
+            }
+        }
     }
 }

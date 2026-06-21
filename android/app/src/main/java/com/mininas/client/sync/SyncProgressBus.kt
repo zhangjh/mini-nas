@@ -18,6 +18,7 @@ data class TaskProgress(
     val fileProgress: Float = 0f,
     val succeeded: Int = 0,
     val failed: Int = 0,
+    val skipped: Int = 0,
     val message: String = "",
 ) {
     enum class Phase { IDLE, SCANNING, UPLOADING, DONE, FAILED, CANCELLED }

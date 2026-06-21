@@ -1,11 +1,11 @@
 package com.mininas.client.sync
 
-import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.mininas.client.MiniNasApp
 import com.mininas.client.data.prefs.SyncHistoryEntry
 import com.mininas.client.data.prefs.SyncTaskDef
+import com.mininas.client.data.prefs.SyncedFileEntry
 import com.mininas.client.util.PathUtil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +21,12 @@ import java.util.UUID
  * Walks a SAF document tree and uploads every file to the configured server
  * path, mirroring the directory structure. Reports progress via [progressBus]
  * and persists per-file results to [SyncStore].
+ *
+ * Incremental sync: a per-task manifest of already-uploaded files (path,
+ * size, lastModified) is kept in [SyncStore]. On subsequent runs, files
+ * whose size and lastModified match the manifest are skipped without any
+ * network request. Files not in the manifest fall back to a server-side
+ * existence check before uploading.
  */
 class SyncEngine(
     private val app: MiniNasApp,
@@ -63,13 +69,16 @@ class SyncEngine(
             return
         }
         val files = mutableListOf<DocEntry>()
-        collect(root, "", files)
+        collect(root, "", files, task.id)
         if (files.isEmpty()) {
             bus.update(task.id) {
                 it.copy(phase = TaskProgress.Phase.DONE, total = 0, current = 0, message = "目录为空")
             }
             return
         }
+
+        // Load the manifest of files already uploaded for this task.
+        val manifest = app.syncStore.getSyncedFiles(task.id).toMutableMap()
 
         bus.update(task.id) {
             it.copy(
@@ -78,6 +87,7 @@ class SyncEngine(
                 current = 0,
                 succeeded = 0,
                 failed = 0,
+                skipped = 0,
                 message = "开始上传",
             )
         }
@@ -85,6 +95,7 @@ class SyncEngine(
         val history = mutableListOf<SyncHistoryEntry>()
         var succeeded = 0
         var failed = 0
+        var skipped = 0
         files.forEachIndexed { idx, entry ->
             val cur = bus.get(task.id)
             if (cur?.phase == TaskProgress.Phase.CANCELLED) return@forEachIndexed
@@ -93,18 +104,75 @@ class SyncEngine(
                     current = idx + 1,
                     currentFile = entry.relativePath,
                     fileProgress = 0f,
-                    message = "上传 ${entry.relativePath}",
+                    message = "检查 ${entry.relativePath}",
                 )
             }
+
+            // 1) Local manifest hit: size + lastModified both match → skip
+            //    without any network request.
+            val local = manifest[entry.relativePath]
+            if (local != null &&
+                local.size == entry.size &&
+                (entry.lastModified == 0L || local.lastModified == entry.lastModified)
+            ) {
+                skipped++
+                history.add(
+                    SyncHistoryEntry(
+                        id = UUID.randomUUID().toString(),
+                        taskId = task.id,
+                        relativePath = entry.relativePath,
+                        status = "skipped",
+                        size = entry.size,
+                        message = "本地已同步，未修改",
+                    )
+                )
+                bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+            }
+
             val targetDir = PathUtil.join(task.targetPath, entry.relativeParent)
-            // Ensure target directory exists (best-effort, ignore "already exists" errors).
+            // Ensure target directory exists (best-effort).
             if (entry.relativeParent.isNotEmpty()) {
                 runCatching { app.fileRepo.mkdir(targetDir) }
             }
+
+            // 2) Server fallback: if another device already uploaded a file
+            //    with the same name and size, skip the upload.
+            val targetPath = PathUtil.join(targetDir, entry.relativePath.substringAfterLast('/'))
+            val existing = runCatching { app.fileRepo.getFileInfoOrNull(targetPath) }.getOrNull()
+            if (existing != null && !existing.isDir && existing.size == entry.size) {
+                skipped++
+                manifest[entry.relativePath] = SyncedFileEntry(
+                    relativePath = entry.relativePath,
+                    size = entry.size,
+                    lastModified = entry.lastModified,
+                    syncedAt = System.currentTimeMillis(),
+                )
+                history.add(
+                    SyncHistoryEntry(
+                        id = UUID.randomUUID().toString(),
+                        taskId = task.id,
+                        relativePath = entry.relativePath,
+                        status = "skipped",
+                        size = entry.size,
+                        message = "服务器已存在相同文件",
+                    )
+                )
+                bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+            }
+
+            // 3) Upload needed. Stream directly from the SAF InputStream via
+            //    OkHttp, no temp-file copy.
+            bus.update(task.id) {
+                it.copy(message = "上传 ${entry.relativePath}")
+            }
+            val fileName = entry.relativePath.substringAfterLast('/')
             val result = runCatching {
                 app.fileRepo.uploadFile(
                     path = targetDir,
-                    file = entry.cachedFile,
+                    contentResolver = app.contentResolver,
+                    uri = entry.uri,
+                    fileName = fileName,
+                    size = entry.size,
                     mimeType = entry.mimeType,
                     onProgress = { p ->
                         bus.update(task.id) { it.copy(fileProgress = p) }
@@ -113,13 +181,19 @@ class SyncEngine(
             }
             if (result.isSuccess) {
                 succeeded++
+                manifest[entry.relativePath] = SyncedFileEntry(
+                    relativePath = entry.relativePath,
+                    size = entry.size,
+                    lastModified = entry.lastModified,
+                    syncedAt = System.currentTimeMillis(),
+                )
                 history.add(
                     SyncHistoryEntry(
                         id = UUID.randomUUID().toString(),
                         taskId = task.id,
                         relativePath = entry.relativePath,
                         status = "success",
-                        size = entry.cachedFile.length(),
+                        size = entry.size,
                     )
                 )
             } else {
@@ -131,16 +205,17 @@ class SyncEngine(
                         relativePath = entry.relativePath,
                         status = "failed",
                         message = result.exceptionOrNull()?.message ?: "上传失败",
-                        size = entry.cachedFile.length(),
+                        size = entry.size,
                     )
                 )
             }
             bus.update(task.id) { it.copy(succeeded = succeeded, failed = failed) }
-            // Clean up cached copy.
-            entry.cachedFile.delete()
         }
 
+        // Persist the updated manifest so the next run can skip locally.
+        app.syncStore.saveSyncedFiles(task.id, manifest.values.toList())
         app.syncStore.appendHistory(history)
+
         val finalPhase = when {
             failed == 0 -> TaskProgress.Phase.DONE
             succeeded == 0 -> TaskProgress.Phase.FAILED
@@ -151,43 +226,45 @@ class SyncEngine(
                 phase = finalPhase,
                 current = files.size,
                 fileProgress = 1f,
-                message = "完成：成功 $succeeded，失败 $failed",
+                message = "完成：成功 $succeeded，跳过 $skipped，失败 $failed",
             )
         }
     }
 
-    private fun collect(node: DocumentFile, parent: String, out: MutableList<DocEntry>) {
+    private fun collect(
+        node: DocumentFile,
+        parent: String,
+        out: MutableList<DocEntry>,
+        taskId: String,
+    ) {
         node.listFiles().forEach { child ->
             val name = child.name ?: return@forEach
             if (child.isDirectory) {
-                collect(child, if (parent.isEmpty()) name else "$parent/$name", out)
+                collect(child, if (parent.isEmpty()) name else "$parent/$name", out, taskId)
             } else if (child.isFile) {
-                // Cache to a temp file so OkHttp can stream with progress.
-                val cached = java.io.File.createTempFile("sync_", "_${sanitize(name)}", app.cacheDir)
-                runCatching {
-                    app.contentResolver.openInputStream(child.uri)?.use { input ->
-                        cached.outputStream().use { input.copyTo(it) }
-                    }
-                }.onFailure { cached.delete(); return@forEach }
                 out.add(
                     DocEntry(
                         relativeParent = parent,
                         relativePath = if (parent.isEmpty()) name else "$parent/$name",
-                        cachedFile = cached,
+                        uri = child.uri,
+                        size = child.length(),
+                        lastModified = child.lastModified(),
                         mimeType = child.type ?: "application/octet-stream",
                     )
                 )
+                app.syncProgress.update(taskId) {
+                    it.copy(message = "扫描文件… 已发现 ${out.size} 个")
+                }
             }
         }
     }
 
-    private fun sanitize(name: String): String =
-        name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(32).ifEmpty { "file" }
-
     private data class DocEntry(
         val relativeParent: String,
         val relativePath: String,
-        val cachedFile: java.io.File,
+        val uri: Uri,
+        val size: Long,
+        val lastModified: Long,
         val mimeType: String,
     )
 }

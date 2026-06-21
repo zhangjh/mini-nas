@@ -127,10 +127,11 @@ fun FilesScreen(
         }
     }
 
-    BackHandler(enabled = state.selection.isNotEmpty() || state.searchResults != null) {
+    BackHandler(enabled = state.selection.isNotEmpty() || state.searchResults != null || state.currentPath.isNotEmpty()) {
         when {
             state.selection.isNotEmpty() -> viewModel.clearSelection()
             state.searchResults != null -> viewModel.clearSearch()
+            state.currentPath.isNotEmpty() -> viewModel.goUp()
         }
     }
 
