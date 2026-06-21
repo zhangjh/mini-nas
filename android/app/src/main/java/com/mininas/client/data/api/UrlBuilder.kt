@@ -18,7 +18,8 @@ class UrlBuilder(
 
     private fun base(): String {
         val b = baseUrlProvider().trimEnd('/')
-        return if (b.isEmpty()) "http://localhost:8080" else b
+        if (b.isEmpty()) return "http://localhost:8080"
+        return if (b.contains("://")) b else "http://$b"
     }
 
     private fun withToken(url: String): String {

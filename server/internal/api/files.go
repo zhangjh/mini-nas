@@ -133,14 +133,7 @@ func (h *FileHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	info, _ := f.Stat()
 	mime := detectMimeType(path)
 	w.Header().Set("Content-Type", mime)
-
-	if isVideo(mime) || isAudio(mime) || mime == "application/pdf" {
-		http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
-		return
-	}
-
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	io.Copy(w, f)
+	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
 }
 
 func (h *FileHandler) Thumbnail(w http.ResponseWriter, r *http.Request) {
