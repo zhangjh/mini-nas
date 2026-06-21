@@ -10,10 +10,13 @@ import com.mininas.client.data.prefs.SettingsStore
 import com.mininas.client.data.prefs.SyncStore
 import com.mininas.client.data.repo.AuthRepository
 import com.mininas.client.data.repo.FileRepository
+import com.mininas.client.sync.SyncEngine
 import com.mininas.client.sync.SyncProgressBus
+import com.mininas.client.sync.SyncScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MiniNasApp : Application() {
@@ -29,6 +32,8 @@ class MiniNasApp : Application() {
     lateinit var authRepo: AuthRepository
         private set
     lateinit var fileRepo: FileRepository
+        private set
+    lateinit var syncEngine: SyncEngine
         private set
     val syncProgress = SyncProgressBus()
 
@@ -46,10 +51,21 @@ class MiniNasApp : Application() {
         )
         authRepo = AuthRepository(apiProvider, settings)
         fileRepo = FileRepository(apiProvider)
+        syncEngine = SyncEngine(this)
 
         appScope.launch {
             val url = settings.getServerUrl()
             if (url.isNotBlank()) apiProvider.updateBaseUrl(url)
+        }
+
+        // Re-evaluate the auto-sync schedule whenever either toggle changes.
+        // combine() emits once both flows have produced an initial value and
+        // re-emits on every subsequent change, so the schedule stays in sync
+        // with the user's settings.
+        appScope.launch {
+            settings.autoSync.combine(settings.wifiOnly) { _, _ -> Unit }.collect {
+                SyncScheduler.schedule(this@MiniNasApp)
+            }
         }
 
         createNotificationChannels()

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -22,6 +23,13 @@ data class SyncTaskDef(
     val sourceUri: String,
     val sourceDisplayName: String,
     val targetPath: String,
+    /**
+     * When non-null, the task syncs via MediaStore instead of walking the
+     * SAF tree. Contains the MediaStore relative-path root (e.g. "DCIM",
+     * "Pictures/Screenshots") used to scope the query. Only set when the
+     * picked SAF folder maps to a known media directory on API 29+.
+     */
+    val mediaRoot: String? = null,
 )
 
 @Serializable
@@ -59,6 +67,7 @@ class SyncStore(private val context: Context) {
     private val keyTasks = stringPreferencesKey("tasks_json")
     private val keyHistory = stringPreferencesKey("history_json")
     private val keySyncedPrefix = "synced_files_"
+    private val keyLastSyncAtPrefix = "last_sync_at_"
 
     val tasks: Flow<List<SyncTaskDef>> = context.syncDataStore.data.map { prefs ->
         prefs[keyTasks]?.let { runCatching { json.decodeFromString(ListSerializer(SyncTaskDef.serializer()), it) }.getOrNull() } ?: emptyList()
@@ -83,8 +92,9 @@ class SyncStore(private val context: Context) {
                 runCatching { json.decodeFromString(ListSerializer(SyncTaskDef.serializer()), it) }.getOrNull()
             } ?: emptyList()
             prefs[keyTasks] = json.encodeToString(ListSerializer(SyncTaskDef.serializer()), list.filterNot { it.id == taskId })
-            // Also drop the synced-files manifest for this task.
+            // Also drop the synced-files manifest and last-sync timestamp for this task.
             prefs.remove(stringPreferencesKey(keySyncedPrefix + taskId))
+            prefs.remove(longPreferencesKey(keyLastSyncAtPrefix + taskId))
         }
     }
 
@@ -125,6 +135,29 @@ class SyncStore(private val context: Context) {
         context.syncDataStore.edit { prefs ->
             prefs[stringPreferencesKey(keySyncedPrefix + taskId)] =
                 json.encodeToString(ListSerializer(SyncedFileEntry.serializer()), entries)
+        }
+    }
+
+    /**
+     * Returns the max file lastModified timestamp seen during the last
+     * successful sync for [taskId], or 0 if none recorded yet. Used by
+     * [SyncEngine] to skip unchanged files during the directory walk
+     * itself, avoiding a full re-scan.
+     */
+    suspend fun getLastSyncAt(taskId: String): Long {
+        val prefs = context.syncDataStore.data.first()
+        return prefs[longPreferencesKey(keyLastSyncAtPrefix + taskId)] ?: 0L
+    }
+
+    /**
+     * Persists [timestamp] as the new last-sync watermark for [taskId].
+     * Only call this after a sync run with no failures, so that failed
+     * files (whose lastModified is <= [timestamp]) are retried on the
+     * next run instead of being skipped.
+     */
+    suspend fun saveLastSyncAt(taskId: String, timestamp: Long) {
+        context.syncDataStore.edit { prefs ->
+            prefs[longPreferencesKey(keyLastSyncAtPrefix + taskId)] = timestamp
         }
     }
 

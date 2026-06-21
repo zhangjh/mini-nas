@@ -1,6 +1,9 @@
 package com.mininas.client.sync
 
+import android.content.ContentUris
+import android.content.ContentResolver
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
 import com.mininas.client.MiniNasApp
 import com.mininas.client.data.prefs.SyncHistoryEntry
@@ -18,15 +21,24 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
- * Walks a SAF document tree and uploads every file to the configured server
- * path, mirroring the directory structure. Reports progress via [progressBus]
- * and persists per-file results to [SyncStore].
+ * Syncs files from the device to the configured server path, mirroring the
+ * directory structure. Reports progress via [progressBus] and persists
+ * per-file results to [SyncStore].
  *
- * Incremental sync: a per-task manifest of already-uploaded files (path,
- * size, lastModified) is kept in [SyncStore]. On subsequent runs, files
- * whose size and lastModified match the manifest are skipped without any
- * network request. Files not in the manifest fall back to a server-side
- * existence check before uploading.
+ * Two collection strategies, chosen per task by [SyncTaskDef.mediaRoot]:
+ *
+ * - **MediaStore** (media folders like DCIM/Pictures): queries the system
+ *   MediaStore with `date_modified > lastSyncAt`, sorted descending. This
+ *   is an indexed database lookup — no directory traversal needed, so
+ *   only new/modified files are returned in O(log n).
+ *
+ * - **SAF** (arbitrary folders): walks the DocumentFile tree. Each
+ *   directory's files are sorted by lastModified descending and
+ *   collection stops at the watermark, so old files are skipped early.
+ *
+ * Both paths share the same watermark ([SyncStore.getLastSyncAt]) and
+ * upload logic. The watermark is only advanced on a clean run (no
+ * failures), so failed files are retried next time.
  */
 class SyncEngine(
     private val app: MiniNasApp,
@@ -53,6 +65,19 @@ class SyncEngine(
         return runId
     }
 
+    /**
+     * Starts [task] (or joins the in-flight run if already active) and
+     * suspends until it completes. Intended for background callers such as
+     * [AutoSyncWorker] that need to await the result.
+     */
+    suspend fun runOnce(task: SyncTaskDef) {
+        start(task)
+        // start() returns the existing runId if already active; join the
+        // current job. If it already finished and removed itself, join is
+        // a no-op.
+        running[task.id]?.join()
+    }
+
     fun cancel(taskId: String) {
         running[taskId]?.cancel()
         running.remove(taskId)
@@ -61,23 +86,47 @@ class SyncEngine(
 
     private suspend fun runSync(task: SyncTaskDef, runId: String) {
         val bus = app.syncProgress
-        bus.update(task.id) { it.copy(phase = TaskProgress.Phase.SCANNING, message = "扫描文件…") }
+        val lastSyncAt = app.syncStore.getLastSyncAt(task.id)
 
-        val root = DocumentFile.fromTreeUri(app, Uri.parse(task.sourceUri))
-        if (root == null || !root.exists()) {
-            bus.update(task.id) { it.copy(phase = TaskProgress.Phase.FAILED, message = "无法访问源目录") }
-            return
+        bus.update(task.id) {
+            it.copy(
+                phase = TaskProgress.Phase.SCANNING,
+                message = if (lastSyncAt > 0) "增量扫描文件…" else "扫描文件…",
+            )
         }
+
         val files = mutableListOf<DocEntry>()
-        collect(root, "", files, task.id)
+        val maxLastModified = if (task.mediaRoot != null) {
+            collectFromMediaStore(task.mediaRoot, files, task.id, lastSyncAt)
+        } else {
+            val root = DocumentFile.fromTreeUri(app, Uri.parse(task.sourceUri))
+            if (root == null || !root.exists()) {
+                bus.update(task.id) { it.copy(phase = TaskProgress.Phase.FAILED, message = "无法访问源目录") }
+                return
+            }
+            collect(root, "", files, task.id, lastSyncAt)
+        }
         if (files.isEmpty()) {
+            // No new/modified files. Advance the watermark so the next run
+            // can skip the same old files, but only if we actually saw any
+            // files (maxLastModified > 0) and didn't already have one.
+            if (lastSyncAt == 0L && maxLastModified > 0) {
+                app.syncStore.saveLastSyncAt(task.id, maxLastModified)
+            }
             bus.update(task.id) {
-                it.copy(phase = TaskProgress.Phase.DONE, total = 0, current = 0, message = "目录为空")
+                it.copy(
+                    phase = TaskProgress.Phase.DONE,
+                    total = 0,
+                    current = 0,
+                    message = if (lastSyncAt > 0) "无新文件需要同步" else "目录为空",
+                )
             }
             return
         }
 
-        // Load the manifest of files already uploaded for this task.
+        // Load the manifest after scanning. It's only needed for the
+        // upload-skip fallback (e.g. files re-collected after a failed run
+        // whose watermark wasn't advanced), not for collect() itself.
         val manifest = app.syncStore.getSyncedFiles(task.id).toMutableMap()
 
         bus.update(task.id) {
@@ -127,6 +176,7 @@ class SyncEngine(
                     )
                 )
                 bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+                return@forEachIndexed
             }
 
             val targetDir = PathUtil.join(task.targetPath, entry.relativeParent)
@@ -158,6 +208,7 @@ class SyncEngine(
                     )
                 )
                 bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+                return@forEachIndexed
             }
 
             // 3) Upload needed. Stream directly from the SAF InputStream via
@@ -216,6 +267,14 @@ class SyncEngine(
         app.syncStore.saveSyncedFiles(task.id, manifest.values.toList())
         app.syncStore.appendHistory(history)
 
+        // Advance the incremental-sync watermark. Only do this when the run
+        // had no failures, so that failed files (whose lastModified is <=
+        // maxLastModified) are retried on the next run instead of being
+        // skipped by the timestamp filter during collect().
+        if (failed == 0 && maxLastModified > 0) {
+            app.syncStore.saveLastSyncAt(task.id, maxLastModified)
+        }
+
         val finalPhase = when {
             failed == 0 -> TaskProgress.Phase.DONE
             succeeded == 0 -> TaskProgress.Phase.FAILED
@@ -231,32 +290,174 @@ class SyncEngine(
         }
     }
 
+    /**
+     * Queries MediaStore for new/modified media files under [mediaRoot].
+     * Returns the maximum date_modified (in ms) seen across ALL matched
+     * files, so the caller can advance the watermark.
+     *
+     * Incremental filter: when [lastSyncAt] > 0, only files with
+     * `date_modified > lastSyncAt/1000` are returned (MediaStore stores
+     * seconds, the watermark is in ms). When [lastSyncAt] is 0 (first
+     * run), all files under [mediaRoot] are returned.
+     *
+     * This is a single indexed database query per collection (Images,
+     * Video) — no directory traversal, so it's dramatically faster than
+     * walking the SAF tree for large photo libraries.
+     */
+    private fun collectFromMediaStore(
+        mediaRoot: String,
+        out: MutableList<DocEntry>,
+        taskId: String,
+        lastSyncAt: Long,
+    ): Long {
+        val resolver: ContentResolver = app.contentResolver
+        var maxLastModified = 0L
+
+        // MediaStore stores date_modified in seconds; our watermark is in ms.
+        val lastSyncSeconds = lastSyncAt / 1000
+
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.DATE_MODIFIED,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.RELATIVE_PATH,
+        )
+
+        // Scope to mediaRoot and its subfolders. RELATIVE_PATH looks like
+        // "DCIM/Camera/" (trailing slash, no leading slash).
+        val selection = buildString {
+            if (lastSyncAt > 0) append("${MediaStore.MediaColumns.DATE_MODIFIED} > ?")
+            else append("${MediaStore.MediaColumns.DATE_MODIFIED} >= 0")
+            append(" AND ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?")
+        }
+        val selectionArgs = if (lastSyncAt > 0) {
+            arrayOf(lastSyncSeconds.toString(), "$mediaRoot/%")
+        } else {
+            arrayOf("0", "$mediaRoot/%")
+        }
+        val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+
+        // Query Images and Video collections. Audio is omitted since the
+        // primary use case is photo/video backup; add it here if needed.
+        val collections = listOf(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+        )
+
+        for (collection in collections) {
+            resolver.query(collection, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                val relPathCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    val name = cursor.getString(nameCol) ?: continue
+                    val size = cursor.getLong(sizeCol)
+                    val dateModifiedSecs = cursor.getLong(dateCol)
+                    val dateModifiedMs = dateModifiedSecs * 1000L
+                    val mimeType = cursor.getString(mimeCol) ?: "application/octet-stream"
+                    val relPath = cursor.getString(relPathCol) ?: ""
+
+                    if (dateModifiedMs > maxLastModified) maxLastModified = dateModifiedMs
+
+                    val contentUri = ContentUris.withAppendedId(collection, id)
+
+                    // Build path relative to mediaRoot so the server-side
+                    // structure mirrors the picked folder.
+                    // relPath = "DCIM/Camera/Sub/" → strip "DCIM/" prefix
+                    val relativeParent = relPath
+                        .removePrefix("$mediaRoot/")
+                        .trimEnd('/')
+
+                    out.add(
+                        DocEntry(
+                            relativeParent = relativeParent,
+                            relativePath = if (relativeParent.isEmpty()) name else "$relativeParent/$name",
+                            uri = contentUri,
+                            size = size,
+                            lastModified = dateModifiedMs,
+                            mimeType = mimeType,
+                        ),
+                    )
+                    app.syncProgress.update(taskId) {
+                        it.copy(message = "扫描文件… 已发现 ${out.size} 个")
+                    }
+                }
+            }
+        }
+        return maxLastModified
+    }
+
+    /**
+     * Recursively walks [node] and appends files that need processing to
+     * [out]. Returns the maximum lastModified seen across ALL files
+     * (including skipped ones), so the caller can advance the watermark.
+     *
+     * Incremental filter: within each directory, files are sorted by
+     * lastModified descending. We collect files while their lastModified
+     * is strictly greater than [lastSyncAt], and stop as soon as we
+     * encounter one at or below the watermark — because the list is
+     * sorted, every remaining file is equally old. Subdirectories are
+     * always recursed into (a subdir may contain new files even when
+     * the parent directory's own files are all old).
+     *
+     * When [lastSyncAt] is 0 (first run), no filtering is applied and
+     * every file is collected.
+     */
     private fun collect(
         node: DocumentFile,
         parent: String,
         out: MutableList<DocEntry>,
         taskId: String,
-    ) {
+        lastSyncAt: Long,
+    ): Long {
+        var maxLastModified = 0L
+        val files = mutableListOf<DocumentFile>()
         node.listFiles().forEach { child ->
             val name = child.name ?: return@forEach
             if (child.isDirectory) {
-                collect(child, if (parent.isEmpty()) name else "$parent/$name", out, taskId)
-            } else if (child.isFile) {
-                out.add(
-                    DocEntry(
-                        relativeParent = parent,
-                        relativePath = if (parent.isEmpty()) name else "$parent/$name",
-                        uri = child.uri,
-                        size = child.length(),
-                        lastModified = child.lastModified(),
-                        mimeType = child.type ?: "application/octet-stream",
-                    )
+                maxLastModified = maxOf(
+                    maxLastModified,
+                    collect(child, if (parent.isEmpty()) name else "$parent/$name", out, taskId, lastSyncAt),
                 )
-                app.syncProgress.update(taskId) {
-                    it.copy(message = "扫描文件… 已发现 ${out.size} 个")
-                }
+            } else if (child.isFile) {
+                files.add(child)
             }
         }
+
+        // Sort newest-first so we can stop at the watermark.
+        files.sortByDescending { it.lastModified() }
+
+        for (file in files) {
+            val lm = file.lastModified()
+            if (lm > maxLastModified) maxLastModified = lm
+
+            // Once we hit a file at or below the watermark, all remaining
+            // files (sorted descending) are equally old — stop.
+            if (lastSyncAt > 0 && lm <= lastSyncAt) break
+
+            val name = file.name ?: continue
+            out.add(
+                DocEntry(
+                    relativeParent = parent,
+                    relativePath = if (parent.isEmpty()) name else "$parent/$name",
+                    uri = file.uri,
+                    size = file.length(),
+                    lastModified = lm,
+                    mimeType = file.type ?: "application/octet-stream",
+                ),
+            )
+            app.syncProgress.update(taskId) {
+                it.copy(message = "扫描文件… 已发现 ${out.size} 个")
+            }
+        }
+        return maxLastModified
     }
 
     private data class DocEntry(

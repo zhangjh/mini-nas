@@ -24,11 +24,16 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { /* Sync continues without notification permission. */ }
 
+    private val mediaPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { /* MediaStore sync is used only for granted permissions; others fall back to SAF. */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestNotificationPermissionIfNeeded()
+        requestMediaPermissionsIfNeeded()
 
         setContent {
             MiniNasTheme {
@@ -48,6 +53,31 @@ class MainActivity : ComponentActivity() {
                 this, Manifest.permission.POST_NOTIFICATIONS,
             ) == PackageManager.PERMISSION_GRANTED
             if (!granted) notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    /**
+     * Requests media-read permissions so that sync tasks targeting media
+     * folders (DCIM, Pictures, …) can use the fast MediaStore query path
+     * instead of walking the SAF tree. If denied, those tasks silently
+     * fall back to SAF.
+     */
+    private fun requestMediaPermissionsIfNeeded() {
+        val perms = when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+            )
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+            )
+            else -> return // API < 29: MediaStore path not used
+        }
+        val toRequest = perms.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (toRequest.isNotEmpty()) {
+            mediaPermissionsLauncher.launch(toRequest.toTypedArray())
         }
     }
 }

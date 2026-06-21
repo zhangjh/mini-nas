@@ -1,14 +1,17 @@
 package com.mininas.client.ui.sync
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mininas.client.MiniNasApp
 import com.mininas.client.data.prefs.SyncHistoryEntry
 import com.mininas.client.data.prefs.SyncTaskDef
-import com.mininas.client.sync.SyncEngine
 import com.mininas.client.sync.SyncService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -28,7 +31,7 @@ data class SyncUiState(
 class SyncViewModel(app: Application) : AndroidViewModel(app) {
 
     private val mini = app as MiniNasApp
-    private val engine = SyncEngine(mini)
+    private val engine = mini.syncEngine
 
     private val _toast = MutableStateFlow<String?>(null)
     val state: StateFlow<SyncUiState> = combine(
@@ -42,16 +45,58 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
     val progress get() = mini.syncProgress.tasks
 
     fun addTask(name: String, sourceUri: String, sourceDisplayName: String, targetPath: String) {
+        val mediaRoot = detectMediaRoot(sourceUri)
         val task = SyncTaskDef(
             id = UUID.randomUUID().toString(),
             name = name.ifBlank { sourceDisplayName },
             sourceUri = sourceUri,
             sourceDisplayName = sourceDisplayName,
             targetPath = targetPath,
+            mediaRoot = mediaRoot,
         )
         viewModelScope.launch {
             mini.syncStore.addTask(task)
             startTask(task)
+        }
+    }
+
+    /**
+     * Inspects a SAF tree URI and returns the MediaStore relative-path
+     * root (e.g. "DCIM", "Pictures/Screenshots") if the picked folder
+     * maps to a known media directory. Returns null for non-media
+     * folders, on API < 29 (where RELATIVE_PATH is unavailable), or
+     * when the runtime media-read permission hasn't been granted (in
+     * which case the task falls back to SAF, which uses the SAF tree
+     * permission instead).
+     *
+     * Example: content://com.android.externalstorage.documents/tree/primary%3ADCIM%2FCamera
+     * → "DCIM/Camera"
+     */
+    private fun detectMediaRoot(safTreeUri: String): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        if (!hasMediaReadPermission()) return null
+        val uri = Uri.parse(safTreeUri)
+        val treePath = uri.lastPathSegment ?: return null
+        val decoded = Uri.decode(treePath) // "primary:DCIM/Camera"
+        // Only handle primary external storage — SD card URIs have
+        // different tree segments and MediaStore scoping is unreliable.
+        if (!decoded.startsWith("primary:")) return null
+        val relPath = decoded.removePrefix("primary:").removePrefix("/")
+        if (relPath.isEmpty()) return null
+        val firstSegment = relPath.substringBefore("/")
+        return if (firstSegment in MEDIA_ROOTS) relPath else null
+    }
+
+    private fun hasMediaReadPermission(): Boolean {
+        val ctx = getApplication<Application>()
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_MEDIA_IMAGES) ==
+                PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_MEDIA_VIDEO) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -84,5 +129,10 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
             val doc = androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), Uri.parse(uri))
             doc?.name ?: uri
         }.getOrDefault(uri)
+    }
+
+    companion object {
+        /** Top-level directories that MediaStore indexes. */
+        private val MEDIA_ROOTS = setOf("DCIM", "Pictures", "Movies", "Music")
     }
 }

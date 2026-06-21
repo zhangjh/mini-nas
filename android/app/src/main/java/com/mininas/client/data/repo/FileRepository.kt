@@ -11,6 +11,7 @@ import com.mininas.client.data.api.MkdirRequest
 import com.mininas.client.data.api.Mount
 import com.mininas.client.data.api.MoveCopyRequest
 import com.mininas.client.data.api.RenameRequest
+import com.mininas.client.data.api.SystemDir
 import com.mininas.client.data.api.UpdateMountRequest
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -112,6 +113,13 @@ class FileRepository(
     }
 
     suspend fun listMounts(): List<Mount> = api.listMounts().unwrap()
+
+    /**
+     * 列出服务器宿主机文件系统的目录（用于挂载点路径选择器）。
+     * 调用 GET /api/system/dirs，与 Web 端 DirTree 行为一致。
+     */
+    suspend fun listSystemDirs(path: String? = null): List<SystemDir> =
+        api.listSystemDirs(path).unwrap()
 
     suspend fun createMount(name: String, path: String): Mount =
         api.createMount(CreateMountRequest(name, path)).unwrap()

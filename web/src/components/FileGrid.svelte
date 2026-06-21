@@ -68,7 +68,9 @@
 
 {#if contextMenu}
   <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
-    <button on:click={() => { dispatch('preview', contextMenu.item); contextMenu = null }}>预览</button>
+    {#if !contextMenu.item.is_dir}
+      <button on:click={() => { dispatch('preview', contextMenu.item); contextMenu = null }}>预览</button>
+    {/if}
     <button on:click={() => { dispatch('download', contextMenu.item.path); contextMenu = null }}>下载</button>
     <button on:click={() => { dispatch('rename', contextMenu.item.path); contextMenu = null }}>重命名</button>
     <button class="danger" on:click={() => { if (confirm('确认删除?')) { dispatch('delete', contextMenu.item.path); } contextMenu = null }}>删除</button>

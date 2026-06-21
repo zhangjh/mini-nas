@@ -111,7 +111,19 @@ func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	info, _ := f.Stat()
+	info, err := f.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, model.APIResponse{
+			OK: false, Error: "file not found",
+		})
+		return
+	}
+	if info.IsDir() {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "cannot download a directory",
+		})
+		return
+	}
 	name := filepath.Base(path)
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -130,7 +142,19 @@ func (h *FileHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	info, _ := f.Stat()
+	info, err := f.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, model.APIResponse{
+			OK: false, Error: "file not found",
+		})
+		return
+	}
+	if info.IsDir() {
+		writeJSON(w, http.StatusBadRequest, model.APIResponse{
+			OK: false, Error: "cannot preview a directory",
+		})
+		return
+	}
 	mime := detectMimeType(path)
 	w.Header().Set("Content-Type", mime)
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)

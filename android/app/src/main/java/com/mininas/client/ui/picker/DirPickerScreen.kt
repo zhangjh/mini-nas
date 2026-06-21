@@ -43,7 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.mininas.client.MiniNasApp
-import com.mininas.client.data.api.FileInfo
+import com.mininas.client.data.api.SystemDir
 import com.mininas.client.util.PathUtil
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -59,12 +59,14 @@ class DirPickerViewModel(
     fun load(path: String) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null, currentPath = path)
-            runCatching { app.fileRepo.listFiles(path = path.ifEmpty { null }) }
-                .onSuccess { list ->
+            // 浏览宿主机文件系统以选取挂载路径，调用 GET /api/system/dirs
+            // （不能用 GET /api/files，那只能浏览已挂载路径内的文件）
+            runCatching { app.fileRepo.listSystemDirs(path = path.ifEmpty { null }) }
+                .onSuccess { dirs ->
                     _state.value = _state.value.copy(
-                        items = list.items.filter { it.isDir },
+                        items = dirs,
                         isLoading = false,
-                        currentPath = list.path.ifEmpty { path },
+                        currentPath = path,
                     )
                 }
                 .onFailure { e ->
@@ -83,7 +85,7 @@ class DirPickerViewModel(
 
 data class DirPickerUiState(
     val currentPath: String = "",
-    val items: List<FileInfo> = emptyList(),
+    val items: List<SystemDir> = emptyList(),
     val isLoading: Boolean = false,
     val error: String? = null,
 )
