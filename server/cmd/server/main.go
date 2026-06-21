@@ -49,7 +49,7 @@ func main() {
 	mountSvc := service.NewMountService(cfg.DBPath())
 	userSvc := service.NewUserService(cfg.DBPath())
 
-	fileSvc := service.NewFileService(mountSvc)
+	fileSvc := service.NewFileService(mountSvc, cfg.HostRoot)
 	thumbSvc := service.NewThumbnailService(cfg.ThumbCacheDir())
 
 	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc, userSvc)

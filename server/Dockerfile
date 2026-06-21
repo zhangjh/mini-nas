@@ -12,7 +12,7 @@ COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ .
 COPY --from=web-builder /web/dist ./cmd/server/web
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o mini-nas-server ./cmd/server
+RUN CGO_ENABLED=0 go build -tags withweb -ldflags="-s -w" -o mini-nas-server ./cmd/server
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates ffmpeg tzdata

@@ -49,11 +49,7 @@
 <div class="login-page">
   <div class="login-card">
     <div class="login-icon">
-      <svg width="40" height="40" viewBox="0 0 64 64" fill="none">
-        <rect width="64" height="64" rx="12" fill="#3b82f6"/>
-        <path d="M16 22h14l6 6h12v20H16V22z" fill="#fff" opacity="0.9"/>
-        <circle cx="32" cy="36" r="5" fill="#3b82f6" stroke="#fff" stroke-width="2"/>
-      </svg>
+      <img src="/logo.png" alt="mini-nas" class="logo-img" />
     </div>
     <h2>mini-nas</h2>
     <p class="subtitle">
@@ -126,6 +122,12 @@
   .login-icon {
     margin-bottom: 16px;
     display: inline-block;
+  }
+
+  .login-icon .logo-img {
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
   }
 
   h2 {

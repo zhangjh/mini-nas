@@ -15,6 +15,7 @@ type Config struct {
 	DataDir   string `json:"data_dir"`
 	UploadDir string `json:"upload_dir"`
 	JWTSecret string `json:"jwt_secret"`
+	HostRoot  string `json:"-"` // 宿主机根目录在容器内的映射路径，通过环境变量 HOST_ROOT 设置
 }
 
 func (c *Config) ThumbCacheDir() string {
@@ -44,6 +45,8 @@ func Load(path string) (*Config, error) {
 		cfg.JWTSecret = generateRandomString(32)
 		log.Println("Generated new JWT secret")
 	}
+
+	cfg.HostRoot = os.Getenv("HOST_ROOT")
 
 	cfg.ensureDirs()
 	return cfg, nil

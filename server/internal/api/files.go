@@ -16,10 +16,11 @@ import (
 type FileHandler struct {
 	fileSvc  *service.FileService
 	thumbSvc *service.ThumbnailService
+	hostRoot string // 宿主机根目录在容器内的映射路径，为空则直接用原始路径
 }
 
-func NewFileHandler(fileSvc *service.FileService, thumbSvc *service.ThumbnailService) *FileHandler {
-	return &FileHandler{fileSvc: fileSvc, thumbSvc: thumbSvc}
+func NewFileHandler(fileSvc *service.FileService, thumbSvc *service.ThumbnailService, hostRoot string) *FileHandler {
+	return &FileHandler{fileSvc: fileSvc, thumbSvc: thumbSvc, hostRoot: hostRoot}
 }
 
 func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +285,14 @@ func (h *FileHandler) ListSystemDirs(w http.ResponseWriter, r *http.Request) {
 		path = "/"
 	}
 
-	entries, err := os.ReadDir(path)
+	// 容器环境下通过 hostRoot 映射宿主机路径，前端无感知
+	// 前端传 /mnt，实际读取 /host/mnt，但返回给前端的路径仍是 /mnt
+	hostPath := path
+	if h.hostRoot != "" {
+		hostPath = filepath.Join(h.hostRoot, path)
+	}
+
+	entries, err := os.ReadDir(hostPath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
 			OK: false, Error: err.Error(),
@@ -299,6 +307,7 @@ func (h *FileHandler) ListSystemDirs(w http.ResponseWriter, r *http.Request) {
 			if name == "." || name == ".." {
 				continue
 			}
+			// 返回给前端的路径是原始路径（不带 /host 前缀）
 			dirPath := pathJoin(path, name)
 			dirs = append(dirs, DirEntry{Name: name, Path: dirPath})
 		}

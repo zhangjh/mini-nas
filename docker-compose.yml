@@ -1,15 +1,28 @@
 version: "3.8"
 
 services:
-  mini-nas:
+  server:
     build:
-      context: ./server
-      dockerfile: Dockerfile
-    container_name: mini-nas
+      context: .
+      dockerfile: server/Dockerfile.server
+    container_name: mini-nas-server
     ports:
       - "8080:8080"
     volumes:
       - ./data:/data
+      - /:/host
     environment:
       - TZ=Asia/Shanghai
+      - HOST_ROOT=/host
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: mini-nas-web
+    ports:
+      - "80:80"
+    depends_on:
+      - server
     restart: unless-stopped

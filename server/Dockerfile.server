@@ -1,0 +1,31 @@
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /build
+
+ENV GOPROXY=https://goproxy.cn,direct
+
+COPY server/go.mod server/go.sum ./
+RUN go mod download
+
+COPY server/ .
+
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o mini-nas-server ./cmd/server
+
+FROM alpine:3.19
+
+RUN apk add --no-cache ca-certificates ffmpeg tzdata
+RUN adduser -D -h /data -s /sbin/nologin mini-nas
+
+WORKDIR /app
+
+COPY --from=builder /build/mini-nas-server .
+
+RUN mkdir -p /data /host && chown -R mini-nas:mini-nas /data /app && chmod 755 /host
+
+USER mini-nas
+
+EXPOSE 8080
+
+VOLUME ["/data"]
+
+CMD ["./mini-nas-server", "-config", "/data/config.json", "-data", "/data"]

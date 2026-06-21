@@ -215,7 +215,7 @@
   <div class="app">
     <header class="header">
       <div class="header-left">
-        <span class="logo">mini-nas</span>
+        <img src="/logo.png" alt="mini-nas" class="logo-img" />
       </div>
       <div class="header-center">
         <div class="search-bar">
@@ -380,11 +380,14 @@
     flex-shrink: 0;
   }
 
-  .logo {
-    font-weight: 700;
-    font-size: 1.1rem;
-    color: var(--primary);
-    white-space: nowrap;
+  .logo-img {
+    height: 28px;
+    width: 28px;
+    max-height: 28px;
+    max-width: 28px;
+    object-fit: contain;
+    border-radius: 6px;
+    display: block;
   }
 
   .header-center {
@@ -530,7 +533,7 @@
   @media (max-width: 640px) {
     .header { padding: 0 12px; gap: 8px; }
     .header-center { max-width: none; }
-    .logo { font-size: 1rem; }
+    .logo-img { height: 24px; width: 24px; }
     .toolbar { padding: 6px 12px; }
     .sort-bar { padding: 4px 8px; gap: 2px; }
     .sort-btn { padding: 4px 6px; font-size: 0.75rem; }

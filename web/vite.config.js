@@ -14,7 +14,7 @@ export default defineConfig({
   build: {
     outDir: serverWebDir,
     sourcemap: false,
-    copyPublicDir: false,
+    copyPublicDir: true,
     emptyOutDir: true
   }
 })

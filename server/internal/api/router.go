@@ -25,7 +25,7 @@ func NewRouter(cfg *config.Config, fileSvc *service.FileService, thumbSvc *servi
 
 	authM := NewAuthMiddleware(cfg.JWTSecret)
 	authH := NewAuthHandler(authM, userSvc)
-	fileH := NewFileHandler(fileSvc, thumbSvc)
+	fileH := NewFileHandler(fileSvc, thumbSvc, cfg.HostRoot)
 	mountH := NewMountHandler(mountSvc)
 
 	r.Get("/api/auth/status", authH.Status)

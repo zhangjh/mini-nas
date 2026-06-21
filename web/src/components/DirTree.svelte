@@ -10,6 +10,7 @@
   let expanded = {}
   let children = {}
   let loading = {}
+  let errorMsg = ''
 
   async function toggle(path) {
     if (expanded[path]) {
@@ -26,7 +27,7 @@
       children = {...children, [path]: dirs}
       expanded = {...expanded, [path]: true}
     } catch (e) {
-      // silent
+      errorMsg = `无法读取 "${path}"：${e.message}（可能是权限不足）`
     }
     loading = {...loading, [path]: false}
   }
@@ -38,6 +39,10 @@
 </script>
 
 <div class="dir-tree">
+  <div class="tree-hint">浏览服务器宿主机文件系统，选择要挂载的目录</div>
+  {#if errorMsg}
+    <div class="tree-error">{errorMsg}</div>
+  {/if}
   <div class="tree-scroll">
     <div class="tree-node">
       <span class="node-row" class:selected={value === '/'} on:click={() => { select('/'); toggle('/') }}>
@@ -82,6 +87,20 @@
     border-radius: 8px;
     overflow: hidden;
     max-height: 320px;
+  }
+  .tree-hint {
+    padding: 6px 10px;
+    font-size: 0.75rem;
+    color: var(--text2);
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+  }
+  .tree-error {
+    padding: 6px 10px;
+    font-size: 0.75rem;
+    color: var(--danger, #ef4444);
+    background: rgba(239, 68, 68, 0.1);
+    border-bottom: 1px solid var(--border);
   }
   .tree-scroll { overflow-y: auto; flex: 1; padding: 4px 0; }
   .tree-node { user-select: none; }
