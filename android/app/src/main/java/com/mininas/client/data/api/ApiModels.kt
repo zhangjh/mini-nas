@@ -21,7 +21,7 @@ data class FileInfo(
     val size: Long = 0,
     @SerialName("is_dir") val isDir: Boolean = false,
     @SerialName("mod_time") val modTime: Long = 0,
-    val mode: Int = 0,
+    val mode: Long = 0,
 )
 
 @Serializable
