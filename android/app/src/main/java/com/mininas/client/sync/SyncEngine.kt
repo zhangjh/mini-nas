@@ -94,7 +94,7 @@ class SyncEngine(
 
     private suspend fun runSync(task: SyncTaskDef, runId: String) {
         val bus = app.syncProgress
-        val lastSyncAt = app.syncStore.getLastSyncAt(task.id)
+        val lastSyncAt = app.syncStore.getLastSyncAt(task.syncKey)
 
         bus.update(task.id) {
             it.copy(
@@ -119,7 +119,7 @@ class SyncEngine(
             // can skip the same old files, but only if we actually saw any
             // files (maxLastModified > 0) and didn't already have one.
             if (lastSyncAt == 0L && maxLastModified > 0) {
-                app.syncStore.saveLastSyncAt(task.id, maxLastModified)
+                app.syncStore.saveLastSyncAt(task.syncKey, maxLastModified)
             }
             bus.update(task.id) {
                 it.copy(
@@ -135,7 +135,7 @@ class SyncEngine(
         // Load the manifest after scanning. It's only needed for the
         // upload-skip fallback (e.g. files re-collected after a failed run
         // whose watermark wasn't advanced), not for collect() itself.
-        val manifest = app.syncStore.getSyncedFiles(task.id).toMutableMap()
+        val manifest = app.syncStore.getSyncedFiles(task.syncKey).toMutableMap()
 
         bus.update(task.id) {
             it.copy(
@@ -250,7 +250,7 @@ class SyncEngine(
         }
 
         // Persist the updated manifest so the next run can skip locally.
-        app.syncStore.saveSyncedFiles(task.id, manifest.values.toList())
+        app.syncStore.saveSyncedFiles(task.syncKey, manifest.values.toList())
         app.syncStore.appendHistory(history)
 
         // Advance the incremental-sync watermark. Only do this when the run
@@ -258,7 +258,7 @@ class SyncEngine(
         // maxLastModified) are retried on the next run instead of being
         // skipped by the timestamp filter during collect().
         if (failed == 0 && maxLastModified > 0) {
-            app.syncStore.saveLastSyncAt(task.id, maxLastModified)
+            app.syncStore.saveLastSyncAt(task.syncKey, maxLastModified)
         }
 
         val finalPhase = when {

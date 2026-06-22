@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import java.security.MessageDigest
 
 private val Context.syncDataStore: DataStore<Preferences> by preferencesDataStore(name = "mini_nas_sync")
 
@@ -30,7 +31,28 @@ data class SyncTaskDef(
      * picked SAF folder maps to a known media directory on API 29+.
      */
     val mediaRoot: String? = null,
-)
+) {
+    /**
+     * Stable key derived from sourceUri + targetPath, used to key the
+     * watermark and synced-files manifest in [SyncStore]. This decouples
+     * sync progress from the task's lifecycle: deleting and recreating a
+     * task for the same source/target pair resumes incrementally instead
+     * of doing a full re-sync.
+     */
+    val syncKey: String
+        get() = syncKeyOf(sourceUri, targetPath)
+}
+
+/**
+ * Computes a stable sync key from a (sourceUri, targetPath) pair via
+ * SHA-256. Used to persist sync progress (watermark + manifest) across
+ * task deletion/recreation for the same source→target mapping.
+ */
+fun syncKeyOf(sourceUri: String, targetPath: String): String {
+    val input = "$sourceUri|$targetPath"
+    val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
+    return digest.joinToString("") { "%02x".format(it) }.take(32)
+}
 
 @Serializable
 data class SyncHistoryEntry(
@@ -92,9 +114,11 @@ class SyncStore(private val context: Context) {
                 runCatching { json.decodeFromString(ListSerializer(SyncTaskDef.serializer()), it) }.getOrNull()
             } ?: emptyList()
             prefs[keyTasks] = json.encodeToString(ListSerializer(SyncTaskDef.serializer()), list.filterNot { it.id == taskId })
-            // Also drop the synced-files manifest and last-sync timestamp for this task.
-            prefs.remove(stringPreferencesKey(keySyncedPrefix + taskId))
-            prefs.remove(longPreferencesKey(keyLastSyncAtPrefix + taskId))
+            // Intentionally NOT removing the synced-files manifest and
+            // last-sync watermark: they are keyed by (sourceUri, targetPath)
+            // via SyncTaskDef.syncKey, not by taskId. Keeping them lets a
+            // recreated task for the same source→target pair resume
+            // incrementally instead of doing a full re-sync.
         }
     }
 
@@ -114,12 +138,12 @@ class SyncStore(private val context: Context) {
     }
 
     /**
-     * Loads the synced-files manifest for [taskId] as a map keyed by
+     * Loads the synced-files manifest for [syncKey] as a map keyed by
      * relative path. Returns an empty map if none stored yet.
      */
-    suspend fun getSyncedFiles(taskId: String): Map<String, SyncedFileEntry> {
+    suspend fun getSyncedFiles(syncKey: String): Map<String, SyncedFileEntry> {
         val prefs = context.syncDataStore.data.first()
-        val raw = prefs[stringPreferencesKey(keySyncedPrefix + taskId)]
+        val raw = prefs[stringPreferencesKey(keySyncedPrefix + syncKey)]
         return raw?.let {
             runCatching {
                 json.decodeFromString(ListSerializer(SyncedFileEntry.serializer()), it)
@@ -129,35 +153,35 @@ class SyncStore(private val context: Context) {
     }
 
     /**
-     * Replaces the synced-files manifest for [taskId] with [entries].
+     * Replaces the synced-files manifest for [syncKey] with [entries].
      */
-    suspend fun saveSyncedFiles(taskId: String, entries: List<SyncedFileEntry>) {
+    suspend fun saveSyncedFiles(syncKey: String, entries: List<SyncedFileEntry>) {
         context.syncDataStore.edit { prefs ->
-            prefs[stringPreferencesKey(keySyncedPrefix + taskId)] =
+            prefs[stringPreferencesKey(keySyncedPrefix + syncKey)] =
                 json.encodeToString(ListSerializer(SyncedFileEntry.serializer()), entries)
         }
     }
 
     /**
      * Returns the max file lastModified timestamp seen during the last
-     * successful sync for [taskId], or 0 if none recorded yet. Used by
+     * successful sync for [syncKey], or 0 if none recorded yet. Used by
      * [SyncEngine] to skip unchanged files during the directory walk
      * itself, avoiding a full re-scan.
      */
-    suspend fun getLastSyncAt(taskId: String): Long {
+    suspend fun getLastSyncAt(syncKey: String): Long {
         val prefs = context.syncDataStore.data.first()
-        return prefs[longPreferencesKey(keyLastSyncAtPrefix + taskId)] ?: 0L
+        return prefs[longPreferencesKey(keyLastSyncAtPrefix + syncKey)] ?: 0L
     }
 
     /**
-     * Persists [timestamp] as the new last-sync watermark for [taskId].
+     * Persists [timestamp] as the new last-sync watermark for [syncKey].
      * Only call this after a sync run with no failures, so that failed
      * files (whose lastModified is <= [timestamp]) are retried on the
      * next run instead of being skipped.
      */
-    suspend fun saveLastSyncAt(taskId: String, timestamp: Long) {
+    suspend fun saveLastSyncAt(syncKey: String, timestamp: Long) {
         context.syncDataStore.edit { prefs ->
-            prefs[longPreferencesKey(keyLastSyncAtPrefix + taskId)] = timestamp
+            prefs[longPreferencesKey(keyLastSyncAtPrefix + syncKey)] = timestamp
         }
     }
 
