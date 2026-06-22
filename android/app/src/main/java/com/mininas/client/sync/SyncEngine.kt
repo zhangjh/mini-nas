@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.util.UUID
 
 /**
@@ -55,7 +56,7 @@ import java.util.UUID
 class SyncEngine(
     private val app: MiniNasApp,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val running: MutableMap<String, Job> = mutableMapOf()
 
     private val _isRunning: MutableStateFlow<Boolean> = MutableStateFlow(false)
@@ -261,17 +262,19 @@ class SyncEngine(
             }
             val fileName = entry.relativePath.substringAfterLast('/')
             val result = runCatching {
-                app.fileRepo.uploadFile(
-                    path = targetDir,
-                    contentResolver = app.contentResolver,
-                    uri = entry.uri,
-                    fileName = fileName,
-                    size = entry.size,
-                    mimeType = entry.mimeType,
-                    onProgress = { p ->
-                        bus.update(task.id) { it.copy(fileProgress = p) }
-                    },
-                )
+                withTimeout(SINGLE_UPLOAD_TIMEOUT_MS) {
+                    app.fileRepo.uploadFile(
+                        path = targetDir,
+                        contentResolver = app.contentResolver,
+                        uri = entry.uri,
+                        fileName = fileName,
+                        size = entry.size,
+                        mimeType = entry.mimeType,
+                        onProgress = { p ->
+                            bus.update(task.id) { it.copy(fileProgress = p) }
+                        },
+                    )
+                }
             }
             if (result.isSuccess) {
                 succeeded++
@@ -511,4 +514,12 @@ class SyncEngine(
         val lastModified: Long,
         val mimeType: String,
     )
+
+    companion object {
+        /**
+         * 单个文件上传超时。当 App 切换至后台时系统可能冻结 socket，
+         * 此超时确保不会无限期卡住整个同步流程。
+         */
+        private const val SINGLE_UPLOAD_TIMEOUT_MS = 300_000L // 5 分钟
+    }
 }
