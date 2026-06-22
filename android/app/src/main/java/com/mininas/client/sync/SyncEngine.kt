@@ -64,6 +64,13 @@ class SyncEngine(
     fun start(task: SyncTaskDef): String {
         if (running[task.id]?.isActive == true) return task.id
         val runId = UUID.randomUUID().toString()
+        // Mark SCANNING synchronously so SyncService sees an active task
+        // immediately when it starts collecting progress. Without this, the
+        // service may observe an empty task map and stop itself before the
+        // coroutine has a chance to update progress.
+        app.syncProgress.update(task.id) {
+            it.copy(phase = TaskProgress.Phase.SCANNING, message = "准备同步…")
+        }
         val job = scope.launch {
             _isRunning.value = true
             try {

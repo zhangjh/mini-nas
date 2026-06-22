@@ -101,8 +101,11 @@ class SyncViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun startTask(task: SyncTaskDef) {
-        SyncService.start(getApplication())
+        // Start the engine first so progress is SCANNING before the service
+        // begins collecting. This prevents the service from seeing an empty
+        // task map and stopping itself prematurely.
         engine.start(task)
+        SyncService.start(getApplication())
     }
 
     fun cancelTask(taskId: String) = engine.cancel(taskId)

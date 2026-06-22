@@ -11,6 +11,7 @@ import androidx.lifecycle.lifecycleScope
 import com.mininas.client.MainActivity
 import com.mininas.client.MiniNasApp
 import com.mininas.client.R
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -31,8 +32,23 @@ class SyncService : LifecycleService() {
                     it.phase == TaskProgress.Phase.UPLOADING || it.phase == TaskProgress.Phase.SCANNING
                 }
                 if (active.isEmpty()) {
-                    stopForegroundCompat()
-                    stopSelf()
+                    // Grace period: the sync engine may not have updated
+                    // progress yet (e.g. service started slightly before
+                    // engine.start()). Wait before stopping; collectLatest
+                    // cancels this delay if a new value arrives (SCANNING /
+                    // UPLOADING), keeping the service alive.
+                    delay(STOP_GRACE_MS)
+                    // Re-check after the delay — if still no active tasks,
+                    // the sync has truly finished or not started.
+                    val current = app.syncProgress.tasks.value
+                    val stillActive = current.values.any {
+                        it.phase == TaskProgress.Phase.UPLOADING ||
+                            it.phase == TaskProgress.Phase.SCANNING
+                    }
+                    if (!stillActive) {
+                        stopForegroundCompat()
+                        stopSelf()
+                    }
                     return@collectLatest
                 }
                 val t = active.first()
@@ -76,6 +92,7 @@ class SyncService : LifecycleService() {
 
     companion object {
         const val NOTIF_ID = 1001
+        private const val STOP_GRACE_MS = 2000L
         fun start(ctx: Context) {
             val intent = Intent(ctx, SyncService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
