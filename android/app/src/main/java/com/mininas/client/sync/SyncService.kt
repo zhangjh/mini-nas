@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
@@ -18,13 +19,22 @@ import kotlinx.coroutines.launch
 /**
  * Keeps the sync process alive by running as a foreground service while any
  * task is uploading. The actual work happens in [SyncEngine]; this service
- * only owns the lifecycle notification.
+ * only owns the lifecycle notification and a wake lock to keep the CPU
+ * running while the screen is off.
+ *
+ * A foreground service prevents the system from killing the process, but it
+ * does NOT automatically keep the CPU awake. When the screen turns off the
+ * CPU enters sleep and all threads (including [Dispatchers.IO]) are paused.
+ * A partial wake lock keeps the CPU running so uploads continue.
  */
 class SyncService : LifecycleService() {
+
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIF_ID, buildNotification("准备同步…"))
+        acquireWakeLock()
         val app = (application as MiniNasApp)
         lifecycleScope.launch {
             app.syncProgress.tasks.collectLatest { tasks ->
@@ -57,6 +67,33 @@ class SyncService : LifecycleService() {
                 mgr.notify(NOTIF_ID, buildNotification(msg))
             }
         }
+    }
+
+    override fun onDestroy() {
+        releaseWakeLock()
+        super.onDestroy()
+    }
+
+    /**
+     * Acquires a partial wake lock to keep the CPU running while the screen
+     * is off. Without this, the system dozes the CPU when the screen turns
+     * off, pausing all sync coroutines even though the foreground service
+     * keeps the process alive.
+     *
+     * The lock has a 1-hour safety timeout so it can never be held
+     * indefinitely if the service crashes or forgets to release it.
+     */
+    private fun acquireWakeLock() {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "mini-nas:sync",
+        ).also { it.acquire(WAKE_LOCK_TIMEOUT_MS) }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -93,6 +130,7 @@ class SyncService : LifecycleService() {
     companion object {
         const val NOTIF_ID = 1001
         private const val STOP_GRACE_MS = 2000L
+        private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60 * 1000L // 1 hour safety net
         fun start(ctx: Context) {
             val intent = Intent(ctx, SyncService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
