@@ -135,11 +135,13 @@ export function downloadFile(path) {
 }
 
 export function previewUrl(path) {
-  return `${BASE}/files/preview?path=${encodeURIComponent(path)}&t=${Date.now()}&token=${getToken()}`
+  const params = new URLSearchParams({ path, t: Date.now(), token: getToken() || '' })
+  return `${BASE}/files/preview?${params}`
 }
 
 export function thumbUrl(path) {
-  return `${BASE}/thumb?path=${encodeURIComponent(path)}&token=${getToken()}`
+  const params = new URLSearchParams({ path, token: getToken() || '' })
+  return `${BASE}/thumb?${params}`
 }
 
 export function mkdir(path) {

@@ -7,14 +7,20 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zhangjh/mini-nas/server/internal/model"
 )
 
+type fileLock struct {
+	mu sync.RWMutex
+}
+
 type FileService struct {
 	mountSvc *MountService
 	hostRoot string // 宿主机根目录在容器内的映射路径，为空则直接用原始路径
+	fileLocks sync.Map
 }
 
 func NewFileService(mountSvc *MountService, hostRoot string) *FileService {
@@ -27,6 +33,45 @@ func (s *FileService) hostPath(path string) string {
 		return path
 	}
 	return filepath.Join(s.hostRoot, path)
+}
+
+// lockKey 返回用于文件锁的绝对路径键
+func (s *FileService) lockKey(virtualPath string) string {
+	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
+	if mount == nil {
+		return virtualPath
+	}
+	return s.hostPath(filepath.Join(mount.Path, rel))
+}
+
+func (s *FileService) RLockFile(virtualPath string) {
+	key := s.lockKey(virtualPath)
+	v, _ := s.fileLocks.LoadOrStore(key, &fileLock{})
+	v.(*fileLock).mu.RLock()
+}
+
+func (s *FileService) RUnlockFile(virtualPath string) {
+	key := s.lockKey(virtualPath)
+	v, ok := s.fileLocks.Load(key)
+	if !ok {
+		return
+	}
+	v.(*fileLock).mu.RUnlock()
+}
+
+func (s *FileService) LockFile(virtualPath string) {
+	key := s.lockKey(virtualPath)
+	v, _ := s.fileLocks.LoadOrStore(key, &fileLock{})
+	v.(*fileLock).mu.Lock()
+}
+
+func (s *FileService) UnlockFile(virtualPath string) {
+	key := s.lockKey(virtualPath)
+	v, ok := s.fileLocks.Load(key)
+	if !ok {
+		return
+	}
+	v.(*fileLock).mu.Unlock()
 }
 
 func (s *FileService) AbsPath(virtualPath string) string {
@@ -269,6 +314,10 @@ func (s *FileService) WriteFile(virtualPath string, reader io.Reader) (int64, er
 	abs := s.hostPath(filepath.Join(mount.Path, rel))
 	dir := filepath.Dir(abs)
 	os.MkdirAll(dir, 0755)
+
+	// 写锁：防止并发读取读到不完整文件
+	s.LockFile(virtualPath)
+	defer s.UnlockFile(virtualPath)
 
 	tmpPath := fmt.Sprintf("%s.tmp.%d", abs, time.Now().UnixNano())
 	f, err := os.Create(tmpPath)

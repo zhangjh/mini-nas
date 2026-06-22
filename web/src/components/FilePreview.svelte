@@ -19,12 +19,20 @@
 
   let textContent = ''
   let loadingText = false
+  let mediaError = false
+
+  function handleMediaError() {
+    mediaError = true
+  }
 
   onMount(() => {
     if (type === 'text') {
       loadingText = true
       fetch(previewUrl(file.path))
-        .then(r => r.text())
+        .then(r => {
+          if (!r.ok) throw new Error('HTTP ' + r.status)
+          return r.text()
+        })
         .then(t => { textContent = t; loadingText = false })
         .catch(() => { textContent = '加载失败'; loadingText = false })
     }
@@ -51,18 +59,30 @@
     </div>
     <div class="preview-body">
       {#if type === 'image'}
-        <img src={previewUrl(file.path)} alt={file.name} class="preview-image" />
+        {#if mediaError}
+          <div class="preview-error">图片加载失败</div>
+        {:else}
+          <img src={previewUrl(file.path)} alt={file.name} class="preview-image" on:error={handleMediaError} />
+        {/if}
       {:else if type === 'video'}
-        <video class="preview-video" src={previewUrl(file.path)} controls autoplay></video>
+        {#if mediaError}
+          <div class="preview-error">视频加载失败</div>
+        {:else}
+          <video class="preview-video" src={previewUrl(file.path)} controls autoplay on:error={handleMediaError}></video>
+        {/if}
       {:else if type === 'audio'}
         <div class="audio-player">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5">
-            <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
-          </svg>
-          <audio src={previewUrl(file.path)} controls autoplay></audio>
+          {#if mediaError}
+            <div class="preview-error">音频加载失败</div>
+          {:else}
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5">
+              <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+            </svg>
+            <audio src={previewUrl(file.path)} controls autoplay on:error={handleMediaError}></audio>
+          {/if}
         </div>
       {:else if type === 'pdf'}
-        <iframe class="preview-pdf" src={previewUrl(file.path)}></iframe>
+        <iframe class="preview-pdf" src={previewUrl(file.path)} on:error={handleMediaError}></iframe>
       {:else if type === 'text'}
         {#if loadingText}
           <div class="preview-text-loading"><div class="spinner"></div></div>
@@ -182,6 +202,17 @@
     align-items: center;
     justify-content: center;
     padding: 64px;
+  }
+
+  .preview-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 64px 20px;
+    color: var(--text2);
+    font-size: 0.9rem;
+    background: var(--surface);
+    width: 100%;
   }
 
   .preview-unknown {

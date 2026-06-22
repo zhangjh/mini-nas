@@ -139,6 +139,7 @@ fun SyncScreen(
     if (showPicker) {
         DirPickerScreen(
             initialPath = pickedServerDir,
+            virtual = true,
             onConfirm = { picked ->
                 pickedServerDir = picked
                 showPicker = false
@@ -229,14 +230,25 @@ private fun HistoryRow(h: SyncHistoryEntry) {
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(h.relativePath, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val statusText = buildString {
+                append(h.status)
+                append(" · ")
+                append(FormatUtil.size(h.size))
+                if (h.message.isNotEmpty()) {
+                    append(" · ")
+                    append(h.message)
+                }
+            }
             Text(
-                "${h.status} · ${FormatUtil.size(h.size)}",
+                statusText,
                 style = MaterialTheme.typography.labelSmall,
                 color = when (h.status) {
                     "success" -> MaterialTheme.colorScheme.primary
                     "skipped" -> MaterialTheme.colorScheme.tertiary
                     else -> MaterialTheme.colorScheme.error
                 },
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Text(

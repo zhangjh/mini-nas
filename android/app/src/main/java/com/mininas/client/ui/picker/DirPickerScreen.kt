@@ -56,12 +56,31 @@ class DirPickerViewModel(
     private val _state = MutableStateFlow(DirPickerUiState())
     val state: StateFlow<DirPickerUiState> = _state.asStateFlow()
 
-    fun load(path: String) {
+    /**
+     * When true, browse the server's *virtual* namespace (mounts and their
+     * sub-directories via GET /api/files) — used when the caller needs a
+     * virtual path (e.g. a sync target directory). When false (default),
+     * browse the *host* filesystem via GET /api/system/dirs — used when
+     * the caller needs a host path (e.g. creating a mount).
+     */
+    private var virtual: Boolean = false
+
+    fun load(path: String, virtual: Boolean = this.virtual) {
+        this.virtual = virtual
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null, currentPath = path)
-            // 浏览宿主机文件系统以选取挂载路径，调用 GET /api/system/dirs
-            // （不能用 GET /api/files，那只能浏览已挂载路径内的文件）
-            runCatching { app.fileRepo.listSystemDirs(path = path.ifEmpty { null }) }
+            runCatching {
+                if (virtual) {
+                    // Browse the virtual namespace: path="" lists mounts,
+                    // path="<mount>" lists directories inside that mount.
+                    val fileList = app.fileRepo.listFiles(path = path.ifEmpty { null })
+                    fileList.items
+                        .filter { it.isDir }
+                        .map { SystemDir(name = it.name, path = it.path) }
+                } else {
+                    app.fileRepo.listSystemDirs(path = path.ifEmpty { null })
+                }
+            }
                 .onSuccess { dirs ->
                     _state.value = _state.value.copy(
                         items = dirs,
@@ -94,6 +113,7 @@ data class DirPickerUiState(
 @Composable
 fun DirPickerScreen(
     initialPath: String,
+    virtual: Boolean = false,
     onConfirm: (String) -> Unit,
     onBack: () -> Unit,
     viewModel: DirPickerViewModel = androidx.lifecycle.viewmodel.compose.viewModel(
@@ -104,7 +124,7 @@ fun DirPickerScreen(
     ),
 ) {
     val state by viewModel.state.collectAsState()
-    LaunchedEffect(initialPath) { viewModel.load(initialPath) }
+    LaunchedEffect(initialPath, virtual) { viewModel.load(initialPath, virtual) }
 
     Scaffold(
         topBar = {

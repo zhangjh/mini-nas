@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -102,6 +103,10 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
+
+	h.fileSvc.RLockFile(path)
+	defer h.fileSvc.RUnlockFile(path)
+
 	f, err := h.fileSvc.OpenFile(path)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, model.APIResponse{
@@ -127,12 +132,19 @@ func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 	name := filepath.Base(path)
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	io.Copy(w, f)
+
+	n, err := io.Copy(w, f)
+	if err != nil {
+		log.Printf("download error (path=%s): sent %d bytes, err: %v", path, n, err)
+	}
 }
 
 func (h *FileHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
+
+	h.fileSvc.RLockFile(path)
+	defer h.fileSvc.RUnlockFile(path)
+
 	f, err := h.fileSvc.OpenFile(path)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, model.APIResponse{
@@ -157,11 +169,20 @@ func (h *FileHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	}
 	mime := detectMimeType(path)
 	w.Header().Set("Content-Type", mime)
-	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
+
+	n, err := io.Copy(w, f)
+	if err != nil {
+		log.Printf("preview error (path=%s): sent %d bytes, err: %v", path, n, err)
+	}
 }
 
 func (h *FileHandler) Thumbnail(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
+
+	// 读锁：防止并发写入源文件时生成缩略图读到不完整数据
+	h.fileSvc.RLockFile(path)
+	defer h.fileSvc.RUnlockFile(path)
+
 	absPath := h.fileSvc.AbsPath(path)
 
 	thumbPath, err := h.thumbSvc.GetThumbnail(absPath)

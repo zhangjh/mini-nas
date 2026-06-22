@@ -9,6 +9,7 @@ import com.mininas.client.MiniNasApp
 import com.mininas.client.data.prefs.SyncHistoryEntry
 import com.mininas.client.data.prefs.SyncTaskDef
 import com.mininas.client.data.prefs.SyncedFileEntry
+import com.mininas.client.data.repo.toErrorMessage
 import com.mininas.client.util.PathUtil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,13 @@ import java.util.UUID
  * Both paths share the same watermark ([SyncStore.getLastSyncAt]) and
  * upload logic. The watermark is only advanced on a clean run (no
  * failures), so failed files are retried next time.
+ *
+ * Upload path is intentionally minimal — no per-file `mkdir` or server
+ * existence probe. The watermark + local manifest already guarantee we
+ * only ship files that are new or modified since the last successful
+ * sync, so every upload is useful work. The server's `WriteFile` creates
+ * intermediate directories itself (MkdirAll). This keeps sync time
+ * proportional to the number of *new* bytes, not to the total file count.
  */
 class SyncEngine(
     private val app: MiniNasApp,
@@ -179,40 +187,18 @@ class SyncEngine(
                 return@forEachIndexed
             }
 
+            // 2) Upload needed. Stream directly from the SAF/MediaStore
+            //    InputStream via OkHttp, no temp-file copy. The server's
+            //    WriteFile creates intermediate directories automatically
+            //    (MkdirAll), so no client-side mkdir is needed.
+            //
+            //    We intentionally do NOT probe the server for an existing
+            //    file before uploading. The watermark + manifest already
+            //    guarantee we only upload files that are new or modified
+            //    since the last successful sync; a per-file server-existence
+            //    check would add a network round-trip for every single file,
+            //    dominating sync time without real benefit.
             val targetDir = PathUtil.join(task.targetPath, entry.relativeParent)
-            // Ensure target directory exists (best-effort).
-            if (entry.relativeParent.isNotEmpty()) {
-                runCatching { app.fileRepo.mkdir(targetDir) }
-            }
-
-            // 2) Server fallback: if another device already uploaded a file
-            //    with the same name and size, skip the upload.
-            val targetPath = PathUtil.join(targetDir, entry.relativePath.substringAfterLast('/'))
-            val existing = runCatching { app.fileRepo.getFileInfoOrNull(targetPath) }.getOrNull()
-            if (existing != null && !existing.isDir && existing.size == entry.size) {
-                skipped++
-                manifest[entry.relativePath] = SyncedFileEntry(
-                    relativePath = entry.relativePath,
-                    size = entry.size,
-                    lastModified = entry.lastModified,
-                    syncedAt = System.currentTimeMillis(),
-                )
-                history.add(
-                    SyncHistoryEntry(
-                        id = UUID.randomUUID().toString(),
-                        taskId = task.id,
-                        relativePath = entry.relativePath,
-                        status = "skipped",
-                        size = entry.size,
-                        message = "服务器已存在相同文件",
-                    )
-                )
-                bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
-                return@forEachIndexed
-            }
-
-            // 3) Upload needed. Stream directly from the SAF InputStream via
-            //    OkHttp, no temp-file copy.
             bus.update(task.id) {
                 it.copy(message = "上传 ${entry.relativePath}")
             }
@@ -255,7 +241,7 @@ class SyncEngine(
                         taskId = task.id,
                         relativePath = entry.relativePath,
                         status = "failed",
-                        message = result.exceptionOrNull()?.message ?: "上传失败",
+                        message = result.exceptionOrNull()?.toErrorMessage() ?: "上传失败",
                         size = entry.size,
                     )
                 )
@@ -335,7 +321,7 @@ class SyncEngine(
         val selectionArgs = if (lastSyncAt > 0) {
             arrayOf(lastSyncSeconds.toString(), "$mediaRoot/%")
         } else {
-            arrayOf("0", "$mediaRoot/%")
+            arrayOf("$mediaRoot/%")
         }
         val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
 
