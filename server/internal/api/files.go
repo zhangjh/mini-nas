@@ -182,13 +182,13 @@ func (h *FileHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// Use http.ServeContent to support HTTP Range requests (required for
+	// video/audio seeking). ServeContent handles Content-Length, Range,
+	// 206 Partial Content, and conditional requests automatically.
 	mime := detectMimeType(path)
 	w.Header().Set("Content-Type", mime)
-
-	n, err := io.Copy(w, f)
-	if err != nil {
-		log.Printf("preview error (path=%s): sent %d bytes, err: %v", path, n, err)
-	}
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 
 func (h *FileHandler) Thumbnail(w http.ResponseWriter, r *http.Request) {

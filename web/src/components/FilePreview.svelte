@@ -3,6 +3,7 @@
   import { previewUrl, thumbUrl } from '../lib/api.js'
 
   export let file
+  export let files = []
   const dispatch = createEventDispatcher()
 
   let type = 'unknown'
@@ -17,9 +18,25 @@
     else type = 'unknown'
   }
 
+  // Sibling image files for prev/next navigation.
+  const imageExt = /\.(jpg|jpeg|png|gif|webp|bmp)$/i
+  $: imageFiles = files.filter(f => !f.is_dir && imageExt.test(f.name))
+  $: currentIndex = imageFiles.findIndex(f => f.path === file.path)
+  $: canNavigate = type === 'image' && imageFiles.length > 1
+
+  function prev() {
+    if (currentIndex > 0) dispatch('navigate', imageFiles[currentIndex - 1])
+  }
+  function next() {
+    if (currentIndex >= 0 && currentIndex < imageFiles.length - 1) dispatch('navigate', imageFiles[currentIndex + 1])
+  }
+
   let textContent = ''
   let loadingText = false
   let mediaError = false
+
+  // Reset error state when file changes (e.g. navigating between images).
+  $: file, mediaError = false
 
   function handleMediaError() {
     mediaError = true
@@ -44,6 +61,10 @@
 
   function handleKeydown(e) {
     if (e.key === 'Escape') dispatch('close')
+    if (canNavigate) {
+      if (e.key === 'ArrowLeft') prev()
+      if (e.key === 'ArrowRight') next()
+    }
   }
 </script>
 
@@ -53,11 +74,19 @@
   <div class="preview-container">
     <div class="preview-header">
       <span class="preview-name">{file.name}</span>
+      {#if canNavigate}
+        <span class="preview-counter">{currentIndex + 1} / {imageFiles.length}</span>
+      {/if}
       <button class="btn btn-ghost btn-sm" on:click={() => dispatch('close')}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
     <div class="preview-body">
+      {#if canNavigate}
+        <button class="nav-btn nav-prev" on:click={prev} disabled={currentIndex <= 0} title="上一张 (←)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+      {/if}
       {#if type === 'image'}
         {#if mediaError}
           <div class="preview-error">图片加载失败</div>
@@ -98,6 +127,11 @@
           <p>无法预览此文件格式</p>
           <button class="btn btn-primary" on:click={() => { const a = document.createElement('a'); a.href = previewUrl(file.path); a.download = file.name; a.click() }}>下载文件</button>
         </div>
+      {/if}
+      {#if canNavigate}
+        <button class="nav-btn nav-next" on:click={next} disabled={currentIndex >= imageFiles.length - 1} title="下一张 (→)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
       {/if}
     </div>
   </div>
@@ -153,6 +187,37 @@
     justify-content: center;
     min-height: 200px;
     background: #000;
+    position: relative;
+  }
+
+  .nav-btn {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 10;
+    background: rgba(0,0,0,0.5);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+  .nav-btn:hover:not(:disabled) { background: rgba(0,0,0,0.8); }
+  .nav-btn:disabled { opacity: 0.3; cursor: default; }
+  .nav-prev { left: 12px; }
+  .nav-next { right: 12px; }
+
+  .preview-counter {
+    font-size: 0.8rem;
+    color: var(--text2);
+    margin-right: 8px;
+    flex-shrink: 0;
   }
 
   .preview-image {

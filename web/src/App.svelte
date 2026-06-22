@@ -332,7 +332,9 @@
   {#if $previewFile}
     <FilePreview
       file={$previewFile}
+      files={searchActive ? $searchResults : $files}
       on:close={() => $previewFile = null}
+      on:navigate={e => $previewFile = e.detail}
     />
   {/if}
 
