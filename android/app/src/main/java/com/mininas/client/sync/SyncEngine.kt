@@ -41,12 +41,16 @@ import java.util.UUID
  * upload logic. The watermark is only advanced on a clean run (no
  * failures), so failed files are retried next time.
  *
- * Upload path is intentionally minimal — no per-file `mkdir` or server
- * existence probe. The watermark + local manifest already guarantee we
- * only ship files that are new or modified since the last successful
- * sync, so every upload is useful work. The server's `WriteFile` creates
- * intermediate directories itself (MkdirAll). This keeps sync time
- * proportional to the number of *new* bytes, not to the total file count.
+ * Upload path is intentionally minimal — no per-file `mkdir`. The watermark
+ * + local manifest already guarantee we only ship files that are new or
+ * modified since the last successful sync, so every upload is useful work.
+ * The server's `WriteFile` creates intermediate directories itself (MkdirAll).
+ *
+ * On the first run (watermark == 0, manifest empty), a single bulk
+ * `GET /api/files/tree` request fetches all files already on the server.
+ * Files with matching size are skipped and recorded in the manifest, so
+ * subsequent runs skip them locally. This avoids redundant re-uploads when
+ * the task is recreated or the app is upgraded, without per-file probing.
  */
 class SyncEngine(
     private val app: MiniNasApp,
@@ -137,6 +141,27 @@ class SyncEngine(
         // whose watermark wasn't advanced), not for collect() itself.
         val manifest = app.syncStore.getSyncedFiles(task.syncKey).toMutableMap()
 
+        // On the first run (no watermark), the local manifest is empty.
+        // Fetch the server-side file tree so we can skip files that already
+        // exist on the server with matching relative path + size — this
+        // avoids redundant re-uploads when the task is recreated or the app
+        // is upgraded. One bulk request instead of N per-file probes.
+        // The map key is the path relative to task.targetPath (includes
+        // filename + directory structure), so matching is path-exact + size.
+        val remoteFiles: Map<String, Long> = if (lastSyncAt == 0L) {
+            bus.update(task.id) { it.copy(message = "检查远端已同步文件…") }
+            try {
+                val targetPrefix = task.targetPath.trimEnd('/') + "/"
+                app.fileRepo.listFileTree(task.targetPath)
+                    .filter { it.path.startsWith(targetPrefix) }
+                    .associate { it.path.removePrefix(targetPrefix) to it.size }
+            } catch (e: Exception) {
+                emptyMap()
+            }
+        } else {
+            emptyMap()
+        }
+
         bus.update(task.id) {
             it.copy(
                 phase = TaskProgress.Phase.UPLOADING,
@@ -187,17 +212,42 @@ class SyncEngine(
                 return@forEachIndexed
             }
 
+            // 1.5) Server-side dedup: if the file already exists on the
+            //      server at the same relative path with matching size, skip
+            //      the upload and record it in the manifest so it's skipped
+            //      locally next time. The path match is exact (map key lookup
+            //      on entry.relativePath, which includes filename + dirs);
+            //      size is a secondary guard against partial/corrupt uploads.
+            //      This is critical when the local manifest is empty (first
+            //      run, recreated task, app upgrade) but files are already on
+            //      the server from a previous sync.
+            val remoteSize = remoteFiles[entry.relativePath]
+            if (remoteSize != null && remoteSize == entry.size) {
+                skipped++
+                manifest[entry.relativePath] = SyncedFileEntry(
+                    relativePath = entry.relativePath,
+                    size = entry.size,
+                    lastModified = entry.lastModified,
+                    syncedAt = System.currentTimeMillis(),
+                )
+                history.add(
+                    SyncHistoryEntry(
+                        id = UUID.randomUUID().toString(),
+                        taskId = task.id,
+                        relativePath = entry.relativePath,
+                        status = "skipped",
+                        size = entry.size,
+                        message = "远端已存在",
+                    )
+                )
+                bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+                return@forEachIndexed
+            }
+
             // 2) Upload needed. Stream directly from the SAF/MediaStore
             //    InputStream via OkHttp, no temp-file copy. The server's
             //    WriteFile creates intermediate directories automatically
             //    (MkdirAll), so no client-side mkdir is needed.
-            //
-            //    We intentionally do NOT probe the server for an existing
-            //    file before uploading. The watermark + manifest already
-            //    guarantee we only upload files that are new or modified
-            //    since the last successful sync; a per-file server-existence
-            //    check would add a network round-trip for every single file,
-            //    dominating sync time without real benefit.
             val targetDir = PathUtil.join(task.targetPath, entry.relativeParent)
             bus.update(task.id) {
                 it.copy(message = "上传 ${entry.relativePath}")

@@ -45,6 +45,13 @@ class FileRepository(
     suspend fun getFileInfo(path: String): FileInfo = api.getFileInfo(path).unwrap()
 
     /**
+     * 递归列出服务端 [path] 下的所有文件（不含目录），用于同步时跳过
+     * 远端已存在的文件。服务端对应 GET /api/files/tree。
+     */
+    suspend fun listFileTree(path: String): List<FileInfo> =
+        api.listFileTree(path).unwrap()
+
+    /**
      * Returns the [FileInfo] for [path], or null if the file does not exist
      * on the server. Network/other errors still throw.
      */

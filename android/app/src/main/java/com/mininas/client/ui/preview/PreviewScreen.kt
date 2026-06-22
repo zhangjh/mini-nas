@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -45,6 +47,19 @@ import com.mininas.client.data.api.FileInfo
 import com.mininas.client.ui.files.downloadToExternal
 import com.mininas.client.util.FileTypes
 
+/**
+ * Temporary holder for sibling image files when navigating from FilesScreen
+ * to PreviewScreen. Compose Navigation can only pass primitive types via
+ * route arguments, so we use this holder to pass the image list for
+ * swipe-to-navigate in the preview pager.
+ *
+ * Populated by FilesScreen before navigation; consumed by PreviewScreen.
+ */
+object PreviewDataHolder {
+    var files: List<FileInfo> = emptyList()
+    var initialIndex: Int = 0
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PreviewScreen(
@@ -54,13 +69,29 @@ fun PreviewScreen(
 ) {
     val ctx = LocalContext.current
     val state by viewModel.state.collectAsState()
-    LaunchedEffect(file.path) { viewModel.load(file) }
+
+    // Sibling files for swipe navigation. Populated by FilesScreen when the
+    // user taps an image; empty for non-image files or direct navigation.
+    val pagerFiles = remember {
+        val siblings = PreviewDataHolder.files
+        if (siblings.isNotEmpty()) siblings else listOf(file)
+    }
+    val initialPage = remember {
+        PreviewDataHolder.initialIndex.coerceIn(0, pagerFiles.size - 1)
+    }
+    val pagerState = rememberPagerState(initialPage = initialPage) { pagerFiles.size }
+
+    // Current file reflects the pager position so the top bar and actions
+    // (download, share) always target the visible file.
+    val currentFile = pagerFiles[pagerState.currentPage]
+
+    LaunchedEffect(currentFile.path) { viewModel.load(currentFile) }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(currentFile.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -69,7 +100,7 @@ fun PreviewScreen(
                 },
                 actions = {
                     IconButton(onClick = {
-                        downloadToExternal(ctx, file)
+                        downloadToExternal(ctx, currentFile)
                     }) { Icon(Icons.Filled.Download, contentDescription = "下载") }
                     IconButton(onClick = { viewModel.share(ctx) }) {
                         Icon(Icons.Filled.Share, contentDescription = "分享")
@@ -88,24 +119,35 @@ fun PreviewScreen(
             when {
                 state.isLoading -> Text("加载中…", color = Color.White)
                 state.error != null -> Text(state.error!!, color = Color.White)
-                FileTypes.isImage(file.name) -> {
+                FileTypes.isImage(currentFile.name) -> {
                     val app = MiniNasApp.get()
-                    AsyncImage(
-                        model = app.urlBuilder.previewUrl(file.path),
-                        contentDescription = file.name,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    if (pagerFiles.size > 1) {
+                        HorizontalPager(state = pagerState) { page ->
+                            val f = pagerFiles[page]
+                            AsyncImage(
+                                model = app.urlBuilder.previewUrl(f.path),
+                                contentDescription = f.name,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    } else {
+                        AsyncImage(
+                            model = app.urlBuilder.previewUrl(currentFile.path),
+                            contentDescription = currentFile.name,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
-                FileTypes.isVideo(file.name) || FileTypes.isAudio(file.name) -> {
-                    VideoPlayer(file)
+                FileTypes.isVideo(currentFile.name) || FileTypes.isAudio(currentFile.name) -> {
+                    VideoPlayer(currentFile)
                 }
-                FileTypes.isPdf(file.name) || FileTypes.isText(file.name) -> {
+                FileTypes.isPdf(currentFile.name) || FileTypes.isText(currentFile.name) -> {
                     val bytes = state.bytes
                     if (bytes != null) {
-                        if (FileTypes.isText(file.name)) {
+                        if (FileTypes.isText(currentFile.name)) {
                             TextPreview(bytes)
                         } else {
-                            PdfPreview(ctx, bytes, file.name)
+                            PdfPreview(ctx, bytes, currentFile.name)
                         }
                     } else {
                         Text("加载中…", color = Color.White)

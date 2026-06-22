@@ -230,6 +230,57 @@ func (s *FileService) GetFileInfo(virtualPath string) (*model.FileInfo, error) {
 	}, nil
 }
 
+// ListTree recursively walks the directory at virtualPath and returns all
+// files (not directories) with their virtual paths and sizes. Used by the
+// Android sync client to skip files that already exist on the server when
+// the local manifest is empty (e.g., first sync, or task recreated).
+//
+// If the directory does not exist yet, an empty slice is returned (nothing
+// has been synced yet).
+func (s *FileService) ListTree(virtualPath string) ([]model.FileInfo, error) {
+	mount, mountName, rel := s.mountSvc.ResolveMount(virtualPath)
+	if mount == nil {
+		return nil, os.ErrNotExist
+	}
+
+	absDir := s.hostPath(filepath.Join(mount.Path, rel))
+
+	if _, err := os.Stat(absDir); err != nil {
+		if os.IsNotExist(err) {
+			return []model.FileInfo{}, nil
+		}
+		return nil, err
+	}
+
+	var files []model.FileInfo
+	err := filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if info.IsDir() {
+			return nil
+		}
+		relToWalk, err := filepath.Rel(absDir, p)
+		if err != nil {
+			return nil
+		}
+		virtualFile := filepath.Join(mountName, rel, relToWalk)
+		files = append(files, model.FileInfo{
+			Name:    info.Name(),
+			Path:    virtualFile,
+			Size:    info.Size(),
+			IsDir:   false,
+			ModTime: info.ModTime().UnixMilli(),
+			Mode:    info.Mode(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
 func (s *FileService) Mkdir(virtualPath string) error {
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {

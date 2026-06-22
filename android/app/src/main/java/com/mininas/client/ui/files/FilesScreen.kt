@@ -59,6 +59,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mininas.client.MiniNasApp
 import com.mininas.client.data.api.FileInfo
+import com.mininas.client.ui.preview.PreviewDataHolder
+import com.mininas.client.util.FileTypes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,6 +84,20 @@ fun FilesScreen(
     var uploading by remember { mutableStateOf(false) }
     var uploadProgress by remember { mutableStateOf(0f) }
     var uploadName by remember { mutableStateOf("") }
+
+    // Wrap onOpenPreview to populate PreviewDataHolder with sibling image
+    // files, enabling swipe-to-navigate in the preview pager.
+    val handlePreview: (FileInfo) -> Unit = { f ->
+        if (FileTypes.isImage(f.name)) {
+            val images = (state.searchResults ?: state.items).filter { FileTypes.isImage(it.name) }
+            PreviewDataHolder.files = images
+            PreviewDataHolder.initialIndex = images.indexOfFirst { it.path == f.path }.coerceAtLeast(0)
+        } else {
+            PreviewDataHolder.files = emptyList()
+            PreviewDataHolder.initialIndex = 0
+        }
+        onOpenPreview(f)
+    }
 
     val pickFile = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -269,7 +285,7 @@ fun FilesScreen(
                                 items = res,
                                 selection = state.selection,
                                 onNavigate = { viewModel.navigate(it.path) },
-                                onPreview = onOpenPreview,
+                                onPreview = handlePreview,
                                 onMenu = { f, a -> handleMenu(f, a) },
                                 onToggleSelect = viewModel::toggleSelection,
                             )
@@ -280,7 +296,7 @@ fun FilesScreen(
                         items = state.items,
                         selection = state.selection,
                         onNavigate = { viewModel.navigate(it.path) },
-                        onPreview = onOpenPreview,
+                        onPreview = handlePreview,
                         onMenu = { f, a -> handleMenu(f, a) },
                         onToggleSelect = viewModel::toggleSelection,
                     )
@@ -288,7 +304,7 @@ fun FilesScreen(
                         items = state.items,
                         selection = state.selection,
                         onNavigate = { viewModel.navigate(it.path) },
-                        onPreview = onOpenPreview,
+                        onPreview = handlePreview,
                         onMenu = { f, a -> handleMenu(f, a) },
                         onToggleSelect = viewModel::toggleSelection,
                     )

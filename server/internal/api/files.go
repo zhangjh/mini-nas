@@ -60,6 +60,21 @@ func (h *FileHandler) Info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: info})
 }
 
+// Tree returns a flat list of all files (not directories) recursively under
+// the given path. Used by the Android sync client to skip files that already
+// exist on the server when the local manifest is empty.
+func (h *FileHandler) Tree(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	files, err := h.fileSvc.ListTree(path)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: files})
+}
+
 func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {

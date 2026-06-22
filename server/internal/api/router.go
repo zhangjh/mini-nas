@@ -36,6 +36,7 @@ func NewRouter(cfg *config.Config, fileSvc *service.FileService, thumbSvc *servi
 		r.Use(authM.Handler)
 
 		r.Get("/files", fileH.List)
+		r.Get("/files/tree", fileH.Tree)
 		r.Get("/files/info", fileH.Info)
 		r.Get("/files/search", fileH.Search)
 		r.Post("/files/upload", fileH.Upload)

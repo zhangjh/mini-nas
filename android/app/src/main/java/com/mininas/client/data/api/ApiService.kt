@@ -45,6 +45,9 @@ interface ApiService {
         @Query("sort_desc") sortDesc: Boolean? = null,
     ): ApiResponse<FileList>
 
+    @GET("/api/files/tree")
+    suspend fun listFileTree(@Query("path") path: String): ApiResponse<List<FileInfo>>
+
     @GET("/api/files/info")
     suspend fun getFileInfo(@Query("path") path: String): ApiResponse<FileInfo>
 
