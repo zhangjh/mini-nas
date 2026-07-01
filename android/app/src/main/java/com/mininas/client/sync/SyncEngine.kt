@@ -252,7 +252,38 @@ class SyncEngine(
                 return@forEachIndexed
             }
 
-            // 2) Upload needed. Stream directly from the SAF/MediaStore
+            // 2) Runtime server-side check: even if we didn't have this file
+            //    in our manifest or the initial remoteFiles list, the server
+            //    might already have it (e.g., from another device or a
+            //    previous sync that didn't update our manifest). Check once
+            //    before uploading to avoid unnecessary transfer.
+            val targetFilePath = PathUtil.join(task.targetPath, entry.relativePath)
+            val remoteFile = runCatching {
+                app.fileRepo.getFileInfoOrNull(targetFilePath)
+            }.getOrNull()
+            if (remoteFile != null && remoteFile.size == entry.size) {
+                skipped++
+                manifest[entry.relativePath] = SyncedFileEntry(
+                    relativePath = entry.relativePath,
+                    size = entry.size,
+                    lastModified = entry.lastModified,
+                    syncedAt = System.currentTimeMillis(),
+                )
+                history.add(
+                    SyncHistoryEntry(
+                        id = UUID.randomUUID().toString(),
+                        taskId = task.id,
+                        relativePath = entry.relativePath,
+                        status = "skipped",
+                        size = entry.size,
+                        message = "远端已存在（运行时检测）",
+                    )
+                )
+                bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+                return@forEachIndexed
+            }
+
+            // 3) Upload needed. Stream directly from the SAF/MediaStore
             //    InputStream via OkHttp, no temp-file copy. The server's
             //    WriteFile creates intermediate directories automatically
             //    (MkdirAll), so no client-side mkdir is needed.
