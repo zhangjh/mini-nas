@@ -108,7 +108,7 @@ class SyncService : LifecycleService() {
         else PendingIntent.FLAG_UPDATE_CURRENT
         val pi = PendingIntent.getActivity(this, 0, intent, flags)
         return NotificationCompat.Builder(this, MiniNasApp.SYNC_CHANNEL_ID)
-            .setContentTitle("mini-nas 同步")
+            .setContentTitle("Mini-NAS 同步")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)

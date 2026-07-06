@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Mini-Nas</string>
+    <string name="app_name">Mini-NAS</string>
     <string name="login">登录</string>
     <string name="register">注册</string>
     <string name="username">用户名</string>

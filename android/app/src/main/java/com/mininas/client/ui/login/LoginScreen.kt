@@ -77,7 +77,7 @@ fun LoginScreen(
                 )
             }
             Spacer(Modifier.height(16.dp))
-            Text("mini-nas", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Mini-NAS", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Text(
                 "家用轻量级 NAS 文件同步",
                 style = MaterialTheme.typography.bodyMedium,

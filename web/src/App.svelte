@@ -215,7 +215,7 @@
   <div class="app">
     <header class="header">
       <div class="header-left">
-        <img src="/logo.png" alt="mini-nas" class="logo-img" />
+        <img src="/logo.png" alt="Mini-NAS" class="logo-img" />
       </div>
       <div class="header-center">
         <div class="search-bar">
