@@ -92,7 +92,15 @@ fun LoginScreen(
                 OutlinedTextField(
                     value = state.serverUrl,
                     onValueChange = viewModel::updateServerUrl,
-                    label = { Text("服务器地址") },
+                    label = { Text("服务器地址（公网）") },
+                    placeholder = { Text("例如 http://nas.example.com:8080") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = state.lanUrl,
+                    onValueChange = viewModel::updateLanUrl,
+                    label = { Text("内网地址（可选）") },
                     placeholder = { Text("例如 http://192.168.1.10:8080") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
