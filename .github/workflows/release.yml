@@ -26,10 +26,10 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build Debug APK
+      - name: Build Release APK
         run: |
           cd android
-          gradle assembleDebug
+          gradle assembleRelease
 
       - name: Generate Release Notes
         id: notes
@@ -45,4 +45,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: release-notes.md
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+          files: android/app/build/outputs/apk/release/app-release.apk
