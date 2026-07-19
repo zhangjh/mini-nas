@@ -30,3 +30,7 @@ android/captures/
 android/.cxx/
 *.keystore
 *.jks
+
+backup/
+docs/
+gradle_temp/

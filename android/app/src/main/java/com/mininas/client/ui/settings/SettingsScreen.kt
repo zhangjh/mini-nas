@@ -53,12 +53,14 @@ fun SettingsScreen(
     val app = MiniNasApp.get()
     val scope = rememberCoroutineScope()
     val serverUrl by app.settings.serverUrl.collectAsState(initial = "")
+    val lanUrl by app.settings.lanUrl.collectAsState(initial = "")
     val username by app.settings.username.collectAsState(initial = "")
     val wifiOnly by app.settings.wifiOnly.collectAsState(initial = true)
     val autoSync by app.settings.autoSync.collectAsState(initial = false)
 
     var editingUrl by remember { mutableStateOf(false) }
-    var urlDraft by remember { mutableStateOf(serverUrl) }
+    var publicDraft by remember { mutableStateOf(serverUrl) }
+    var lanDraft by remember { mutableStateOf(lanUrl) }
     var confirmLogout by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -89,10 +91,13 @@ fun SettingsScreen(
                     HorizontalDivider()
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("服务器地址", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("公网地址", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(serverUrl.ifBlank { "未配置" }, style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.height(6.dp))
+                            Text("内网地址", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(lanUrl.ifBlank { "未配置" }, style = MaterialTheme.typography.bodyMedium)
                         }
-                        TextButton(onClick = { urlDraft = serverUrl; editingUrl = true }) { Text("修改") }
+                        TextButton(onClick = { publicDraft = serverUrl; lanDraft = lanUrl; editingUrl = true }) { Text("修改") }
                     }
                 }
             }
@@ -158,19 +163,38 @@ fun SettingsScreen(
             onDismissRequest = { editingUrl = false },
             title = { Text("修改服务器地址") },
             text = {
-                OutlinedTextField(
-                    value = urlDraft,
-                    onValueChange = { urlDraft = it },
-                    label = { Text("服务器地址") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = publicDraft,
+                        onValueChange = { publicDraft = it },
+                        label = { Text("公网地址") },
+                        placeholder = { Text("例如 http://nas.example.com:8080") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = lanDraft,
+                        onValueChange = { lanDraft = it },
+                        label = { Text("内网地址（可选）") },
+                        placeholder = { Text("例如 http://192.168.1.10:8080") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "在内网环境时将自动优先使用内网地址进行同步，外网时回退到公网地址。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
-                        app.settings.setServerUrl(urlDraft.trim())
-                        app.apiProvider.updateBaseUrl(urlDraft.trim())
+                        app.settings.setServerUrl(publicDraft.trim())
+                        app.settings.setLanUrl(lanDraft.trim())
+                        // Re-probe so the effective URL updates immediately.
+                        // The selector pushes the result to apiProvider.
+                        app.urlSelector.refresh()
                         editingUrl = false
                     }
                 }) { Text("保存") }

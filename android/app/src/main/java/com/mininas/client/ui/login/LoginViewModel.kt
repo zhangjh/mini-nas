@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
 
 data class LoginUiState(
     val serverUrl: String = "",
+    val lanUrl: String = "",
     val username: String = "",
     val password: String = "",
     val isLoading: Boolean = false,
@@ -29,7 +30,8 @@ class LoginViewModel(
     init {
         viewModelScope.launch {
             val url = app.settings.getServerUrl()
-            _state.value = _state.value.copy(serverUrl = url)
+            val lan = app.settings.getLanUrl()
+            _state.value = _state.value.copy(serverUrl = url, lanUrl = lan)
             runCatching { app.authRepo.status() }
                 .onSuccess { _state.value = _state.value.copy(hasUsers = it.hasUsers) }
                 .onFailure { _state.value = _state.value.copy(hasUsers = null) }
@@ -37,6 +39,7 @@ class LoginViewModel(
     }
 
     fun updateServerUrl(v: String) { _state.value = _state.value.copy(serverUrl = v) }
+    fun updateLanUrl(v: String) { _state.value = _state.value.copy(lanUrl = v) }
     fun updateUsername(v: String) { _state.value = _state.value.copy(username = v, error = null) }
     fun updatePassword(v: String) { _state.value = _state.value.copy(password = v, error = null) }
 
@@ -57,8 +60,13 @@ class LoginViewModel(
         viewModelScope.launch {
             _state.value = s.copy(isLoading = true, error = null)
             runCatching {
+                // Persist both addresses first so the selector can read them.
                 app.settings.setServerUrl(s.serverUrl.trim())
-                app.apiProvider.updateBaseUrl(s.serverUrl.trim())
+                app.settings.setLanUrl(s.lanUrl.trim())
+                // Force a fresh probe: if we're on the LAN, use the faster LAN
+                // route for the login/register call itself. The selector
+                // pushes the result to apiProvider.
+                app.urlSelector.refresh()
                 if (register) app.authRepo.register(s.username, s.password)
                 else app.authRepo.login(s.username, s.password)
             }.onSuccess {

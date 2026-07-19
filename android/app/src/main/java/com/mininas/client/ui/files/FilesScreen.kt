@@ -166,7 +166,7 @@ fun FilesScreen(
                     Column {
                         Text(
                             if (state.selection.isNotEmpty()) "已选 ${state.selection.size}"
-                            else "mini-nas",
+                            else "Mini-NAS",
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,

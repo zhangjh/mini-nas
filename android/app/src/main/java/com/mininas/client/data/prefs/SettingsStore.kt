@@ -17,6 +17,13 @@ private val Context.settingsDataStore: DataStore<Preferences> by preferencesData
 /**
  * Persists user settings (server URL, JWT, username, sync options) in DataStore.
  *
+ * The "server" can be configured with two addresses:
+ * - [serverUrl]: the always-reachable public address (公网域名/IP).
+ * - [lanUrl]: an optional LAN address used when the device is on the same
+ *   network as the NAS, to speed up sync and avoid consuming mobile data
+ *   plan bandwidth through the public route. Selection is handled by
+ *   [com.mininas.client.data.api.ServerUrlSelector].
+ *
  * To avoid blocking the OkHttp dispatcher thread on every network call, the
  * token and server URL are also cached in memory after the first read, so
  * [tokenSync] / [serverUrlSync] are safe to call from any thread.
@@ -24,6 +31,7 @@ private val Context.settingsDataStore: DataStore<Preferences> by preferencesData
 class SettingsStore(private val context: Context) {
 
     private val keyServerUrl = stringPreferencesKey("server_url")
+    private val keyLanUrl = stringPreferencesKey("lan_url")
     private val keyToken = stringPreferencesKey("token")
     private val keyUsername = stringPreferencesKey("username")
     private val keyWifiOnly = booleanPreferencesKey("wifi_only")
@@ -32,8 +40,10 @@ class SettingsStore(private val context: Context) {
     // ---- in-memory caches (written from DataStore reads/writes) ----
     @Volatile private var tokenCache: String? = null
     @Volatile private var urlCache: String = ""
+    @Volatile private var lanUrlCache: String = ""
 
     val serverUrl: Flow<String> = context.settingsDataStore.data.map { it[keyServerUrl] ?: "" }
+    val lanUrl: Flow<String> = context.settingsDataStore.data.map { it[keyLanUrl] ?: "" }
     val token: Flow<String?> = context.settingsDataStore.data.map { it[keyToken] }
     val username: Flow<String> = context.settingsDataStore.data.map { it[keyUsername] ?: "" }
     val wifiOnly: Flow<Boolean> = context.settingsDataStore.data.map { it[keyWifiOnly] ?: true }
@@ -47,6 +57,7 @@ class SettingsStore(private val context: Context) {
             val prefs = runBlocking { context.settingsDataStore.data.first() }
             tokenCache = prefs[keyToken]
             urlCache = prefs[keyServerUrl] ?: ""
+            lanUrlCache = prefs[keyLanUrl] ?: ""
         }
     }
 
@@ -54,19 +65,36 @@ class SettingsStore(private val context: Context) {
 
     fun tokenSync(): String? = tokenCache
     fun serverUrlSync(): String = urlCache
+    fun lanUrlSync(): String = lanUrlCache
 
     // ---- suspend accessors ----
 
     suspend fun getServerUrl(): String = serverUrl.first()
+    suspend fun getLanUrl(): String = lanUrl.first()
     suspend fun getToken(): String? = token.first()
     suspend fun getUsername(): String = username.first()
 
     // ---- mutators ----
 
     suspend fun setServerUrl(url: String) {
-        val normalized = url.trim()
+        val normalized = normalizeUrl(url)
         context.settingsDataStore.edit { it[keyServerUrl] = normalized }
         urlCache = normalized
+    }
+
+    suspend fun setLanUrl(url: String) {
+        val normalized = normalizeUrl(url)
+        context.settingsDataStore.edit { it[keyLanUrl] = normalized }
+        lanUrlCache = normalized
+    }
+
+    private fun normalizeUrl(input: String): String {
+        val s = input.trim()
+        if (s.isBlank()) return ""
+        if (s.contains("://")) return s
+        // IPv4 地址使用 http，其他（域名）使用 https
+        val isIpv4 = Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(:\\d+)?$").matches(s)
+        return if (isIpv4) "http://$s" else "https://$s"
     }
 
     suspend fun setToken(token: String?) {

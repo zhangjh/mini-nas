@@ -62,6 +62,15 @@ class SyncEngine(
     private val _isRunning: MutableStateFlow<Boolean> = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
+    private data class DocEntry(
+        val relativeParent: String,
+        val relativePath: String,
+        val uri: Uri,
+        val size: Long,
+        val lastModified: Long,
+        val mimeType: String,
+    )
+
     fun start(task: SyncTaskDef): String {
         if (running[task.id]?.isActive == true) return task.id
         val runId = UUID.randomUUID().toString()
@@ -107,6 +116,12 @@ class SyncEngine(
     private suspend fun runSync(task: SyncTaskDef, runId: String) {
         val bus = app.syncProgress
         val lastSyncAt = app.syncStore.getLastSyncAt(task.syncKey)
+
+        // Ensure the effective URL is fresh before any network call. This
+        // covers manually-triggered syncs (which don't go through
+        // AutoSyncWorker's refresh). current() only re-probes if the cache is
+        // stale (>30s) or the LAN URL changed, so it's cheap on hot paths.
+        runCatching { app.urlSelector.current() }
 
         bus.update(task.id) {
             it.copy(
@@ -186,153 +201,174 @@ class SyncEngine(
         var succeeded = 0
         var failed = 0
         var skipped = 0
-        files.forEachIndexed { idx, entry ->
-            val cur = bus.get(task.id)
-            if (cur?.phase == TaskProgress.Phase.CANCELLED) return@forEachIndexed
-            bus.update(task.id) {
-                it.copy(
-                    current = idx + 1,
-                    currentFile = entry.relativePath,
-                    fileProgress = 0f,
-                    message = "检查 ${entry.relativePath}",
-                )
-            }
 
-            // 1) Local manifest hit: size + lastModified both match → skip
-            //    without any network request.
-            val local = manifest[entry.relativePath]
-            if (local != null &&
-                local.size == entry.size &&
-                (entry.lastModified == 0L || local.lastModified == entry.lastModified)
-            ) {
-                skipped++
-                history.add(
-                    SyncHistoryEntry(
-                        id = UUID.randomUUID().toString(),
-                        taskId = task.id,
-                        relativePath = entry.relativePath,
-                        status = "skipped",
-                        size = entry.size,
-                        message = "本地已同步，未修改",
-                    )
-                )
-                bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
-                return@forEachIndexed
-            }
-
-            // 1.5) Server-side dedup: if the file already exists on the
-            //      server at the same relative path with matching size, skip
-            //      the upload and record it in the manifest so it's skipped
-            //      locally next time. The path match is exact (map key lookup
-            //      on entry.relativePath, which includes filename + dirs);
-            //      size is a secondary guard against partial/corrupt uploads.
-            //      This is critical when the local manifest is empty (first
-            //      run, recreated task, app upgrade) but files are already on
-            //      the server from a previous sync.
-            val remoteSize = remoteFiles[entry.relativePath]
-            if (remoteSize != null && remoteSize == entry.size) {
-                skipped++
-                manifest[entry.relativePath] = SyncedFileEntry(
-                    relativePath = entry.relativePath,
-                    size = entry.size,
-                    lastModified = entry.lastModified,
-                    syncedAt = System.currentTimeMillis(),
-                )
-                history.add(
-                    SyncHistoryEntry(
-                        id = UUID.randomUUID().toString(),
-                        taskId = task.id,
-                        relativePath = entry.relativePath,
-                        status = "skipped",
-                        size = entry.size,
-                        message = "远端已存在",
-                    )
-                )
-                bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
-                return@forEachIndexed
-            }
-
-            // 2) Upload needed. Stream directly from the SAF/MediaStore
-            //    InputStream via OkHttp, no temp-file copy. The server's
-            //    WriteFile creates intermediate directories automatically
-            //    (MkdirAll), so no client-side mkdir is needed.
-            val targetDir = PathUtil.join(task.targetPath, entry.relativeParent)
-            bus.update(task.id) {
-                it.copy(message = "上传 ${entry.relativePath}")
-            }
-            val fileName = entry.relativePath.substringAfterLast('/')
-            val result = runCatching {
-                withTimeout(SINGLE_UPLOAD_TIMEOUT_MS) {
-                    app.fileRepo.uploadFile(
-                        path = targetDir,
-                        contentResolver = app.contentResolver,
-                        uri = entry.uri,
-                        fileName = fileName,
-                        size = entry.size,
-                        mimeType = entry.mimeType,
-                        onProgress = { p ->
-                            bus.update(task.id) { it.copy(fileProgress = p) }
-                        },
+        try {
+            files.forEachIndexed { idx, entry ->
+                val cur = bus.get(task.id)
+                if (cur?.phase == TaskProgress.Phase.CANCELLED) return@forEachIndexed
+                bus.update(task.id) {
+                    it.copy(
+                        current = idx + 1,
+                        currentFile = entry.relativePath,
+                        fileProgress = 0f,
+                        message = "检查 ${entry.relativePath}",
                     )
                 }
-            }
-            if (result.isSuccess) {
-                succeeded++
-                manifest[entry.relativePath] = SyncedFileEntry(
-                    relativePath = entry.relativePath,
-                    size = entry.size,
-                    lastModified = entry.lastModified,
-                    syncedAt = System.currentTimeMillis(),
-                )
-                history.add(
-                    SyncHistoryEntry(
-                        id = UUID.randomUUID().toString(),
-                        taskId = task.id,
-                        relativePath = entry.relativePath,
-                        status = "success",
-                        size = entry.size,
+
+                val local = manifest[entry.relativePath]
+                if (local != null &&
+                    local.size == entry.size &&
+                    (entry.lastModified == 0L || local.lastModified == entry.lastModified)
+                ) {
+                    skipped++
+                    history.add(
+                        SyncHistoryEntry(
+                            id = UUID.randomUUID().toString(),
+                            taskId = task.id,
+                            relativePath = entry.relativePath,
+                            status = "skipped",
+                            size = entry.size,
+                            message = "本地已同步，未修改",
+                        )
                     )
-                )
-            } else {
-                failed++
-                history.add(
-                    SyncHistoryEntry(
-                        id = UUID.randomUUID().toString(),
-                        taskId = task.id,
+                    bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+                    return@forEachIndexed
+                }
+
+                val remoteSize = remoteFiles[entry.relativePath]
+                if (remoteSize != null && remoteSize == entry.size) {
+                    skipped++
+                    manifest[entry.relativePath] = SyncedFileEntry(
                         relativePath = entry.relativePath,
-                        status = "failed",
-                        message = result.exceptionOrNull()?.toErrorMessage() ?: "上传失败",
                         size = entry.size,
+                        lastModified = entry.lastModified,
+                        syncedAt = System.currentTimeMillis(),
                     )
-                )
+                    history.add(
+                        SyncHistoryEntry(
+                            id = UUID.randomUUID().toString(),
+                            taskId = task.id,
+                            relativePath = entry.relativePath,
+                            status = "skipped",
+                            size = entry.size,
+                            message = "远端已存在",
+                        )
+                    )
+                    bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+                    return@forEachIndexed
+                }
+
+                val targetFilePath = PathUtil.join(task.targetPath, entry.relativePath)
+                val remoteFile = runCatching {
+                    app.fileRepo.getFileInfoOrNull(targetFilePath)
+                }.getOrNull()
+                if (remoteFile != null && remoteFile.size == entry.size) {
+                    skipped++
+                    manifest[entry.relativePath] = SyncedFileEntry(
+                        relativePath = entry.relativePath,
+                        size = entry.size,
+                        lastModified = entry.lastModified,
+                        syncedAt = System.currentTimeMillis(),
+                    )
+                    history.add(
+                        SyncHistoryEntry(
+                            id = UUID.randomUUID().toString(),
+                            taskId = task.id,
+                            relativePath = entry.relativePath,
+                            status = "skipped",
+                            size = entry.size,
+                            message = "远端已存在（运行时检测）",
+                        )
+                    )
+                    bus.update(task.id) { it.copy(skipped = skipped, fileProgress = 1f) }
+                    return@forEachIndexed
+                }
+
+                val targetDir = PathUtil.join(task.targetPath, entry.relativeParent)
+                bus.update(task.id) {
+                    it.copy(message = "上传 ${entry.relativePath}")
+                }
+                val fileName = entry.relativePath.substringAfterLast('/')
+                val result = runCatching {
+                    withTimeout(SINGLE_UPLOAD_TIMEOUT_MS) {
+                        app.fileRepo.uploadFile(
+                            path = targetDir,
+                            contentResolver = app.contentResolver,
+                            uri = entry.uri,
+                            fileName = fileName,
+                            size = entry.size,
+                            mimeType = entry.mimeType,
+                            onProgress = { p ->
+                                bus.update(task.id) { it.copy(fileProgress = p) }
+                            },
+                        )
+                    }
+                }
+                if (result.isSuccess) {
+                    succeeded++
+                    manifest[entry.relativePath] = SyncedFileEntry(
+                        relativePath = entry.relativePath,
+                        size = entry.size,
+                        lastModified = entry.lastModified,
+                        syncedAt = System.currentTimeMillis(),
+                    )
+                    history.add(
+                        SyncHistoryEntry(
+                            id = UUID.randomUUID().toString(),
+                            taskId = task.id,
+                            relativePath = entry.relativePath,
+                            status = "success",
+                            size = entry.size,
+                        )
+                    )
+                } else {
+                    failed++
+                    history.add(
+                        SyncHistoryEntry(
+                            id = UUID.randomUUID().toString(),
+                            taskId = task.id,
+                            relativePath = entry.relativePath,
+                            status = "failed",
+                            message = result.exceptionOrNull()?.toErrorMessage() ?: "上传失败",
+                            size = entry.size,
+                        )
+                    )
+                }
+                bus.update(task.id) { it.copy(succeeded = succeeded, failed = failed) }
             }
-            bus.update(task.id) { it.copy(succeeded = succeeded, failed = failed) }
-        }
-
-        // Persist the updated manifest so the next run can skip locally.
-        app.syncStore.saveSyncedFiles(task.syncKey, manifest.values.toList())
-        app.syncStore.appendHistory(history)
-
-        // Advance the incremental-sync watermark. Only do this when the run
-        // had no failures, so that failed files (whose lastModified is <=
-        // maxLastModified) are retried on the next run instead of being
-        // skipped by the timestamp filter during collect().
-        if (failed == 0 && maxLastModified > 0) {
-            app.syncStore.saveLastSyncAt(task.syncKey, maxLastModified)
-        }
-
-        val finalPhase = when {
-            failed == 0 -> TaskProgress.Phase.DONE
-            succeeded == 0 -> TaskProgress.Phase.FAILED
-            else -> TaskProgress.Phase.DONE
-        }
-        bus.update(task.id) {
-            it.copy(
-                phase = finalPhase,
-                current = files.size,
-                fileProgress = 1f,
-                message = "完成：成功 $succeeded，跳过 $skipped，失败 $failed",
+        } catch (e: Exception) {
+            failed++
+            history.add(
+                SyncHistoryEntry(
+                    id = UUID.randomUUID().toString(),
+                    taskId = task.id,
+                    relativePath = "同步中断",
+                    status = "failed",
+                    message = e.toErrorMessage(),
+                    size = 0,
+                )
             )
+        } finally {
+            app.syncStore.saveSyncedFiles(task.syncKey, manifest.values.toList())
+            app.syncStore.appendHistory(history)
+
+            if (failed == 0 && maxLastModified > 0) {
+                app.syncStore.saveLastSyncAt(task.syncKey, maxLastModified)
+            }
+
+            val finalPhase = when {
+                failed == 0 -> TaskProgress.Phase.DONE
+                succeeded == 0 -> TaskProgress.Phase.FAILED
+                else -> TaskProgress.Phase.DONE
+            }
+            bus.update(task.id) {
+                it.copy(
+                    phase = finalPhase,
+                    current = files.size,
+                    fileProgress = 1f,
+                    message = "完成：成功 $succeeded，跳过 $skipped，失败 $failed",
+                )
+            }
         }
     }
 
@@ -505,15 +541,6 @@ class SyncEngine(
         }
         return maxLastModified
     }
-
-    private data class DocEntry(
-        val relativeParent: String,
-        val relativePath: String,
-        val uri: Uri,
-        val size: Long,
-        val lastModified: Long,
-        val mimeType: String,
-    )
 
     companion object {
         /**

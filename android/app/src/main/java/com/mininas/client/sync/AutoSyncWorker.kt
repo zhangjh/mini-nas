@@ -40,6 +40,13 @@ class AutoSyncWorker(
         // to avoid overlapping runs on the same task ids.
         if (app.syncEngine.isRunning.value) return Result.success()
 
+        // Re-probe the LAN route before running. The worker fires every 15
+        // minutes, so the selector's cache is almost certainly stale; this
+        // ensures we pick the fastest reachable address for this run. The
+        // ApiProvider is rebuilt by the flow collector in MiniNasApp when
+        // the effective URL changes.
+        runCatching { app.urlSelector.refresh() }
+
         // Keep the process alive with a foreground notification while
         // uploading. SyncService stops itself once no task is active.
         SyncService.start(applicationContext)

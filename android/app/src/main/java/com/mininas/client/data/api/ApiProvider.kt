@@ -26,6 +26,7 @@ class ApiProvider(
     }
 
     private val authInterceptor = AuthInterceptor(tokenProvider)
+    private var fallbackInterceptor: FallbackInterceptor? = null
 
     private val okHttp: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -38,18 +39,35 @@ class ApiProvider(
         })
         .build()
 
+    fun setFallbackInterceptor(urlSelector: ServerUrlSelector) {
+        fallbackInterceptor = FallbackInterceptor(urlSelector, this)
+    }
+
     @Volatile
     var current: ApiService = build("http://localhost:8080/")
         private set
 
     /**
+     * The normalized base URL currently in use, or empty if never set. Used to
+     * skip no-op rebuilds in [updateBaseUrl].
+     */
+    @Volatile
+    private var currentNormalizedUrl: String = ""
+
+    /**
      * Rebuilds the Retrofit service against a new base URL. Safe to call from
      * the main thread; existing in-flight requests keep using the old client.
+     *
+     * No-op when [rawUrl] normalizes to the same value already in use — this
+     * is important because [com.mininas.client.data.api.ServerUrlSelector]
+     * emits its effective URL as a flow that may re-emit the same value.
      */
     fun updateBaseUrl(rawUrl: String) {
         val normalized = normalize(rawUrl)
         if (normalized.isBlank()) return
+        if (normalized == currentNormalizedUrl) return
         current = build(normalized)
+        currentNormalizedUrl = normalized
     }
 
     private fun authResponseInterceptor(): Interceptor = Interceptor { chain ->
@@ -62,9 +80,11 @@ class ApiProvider(
 
     private fun build(baseUrl: String): ApiService {
         val url = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
+        val clientBuilder = okHttp.newBuilder()
+        fallbackInterceptor?.let { clientBuilder.addInterceptor(it) }
         return Retrofit.Builder()
             .baseUrl(url)
-            .client(okHttp)
+            .client(clientBuilder.build())
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
             .create(ApiService::class.java)

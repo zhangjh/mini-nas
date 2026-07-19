@@ -49,9 +49,9 @@
 <div class="login-page">
   <div class="login-card">
     <div class="login-icon">
-      <img src="/logo.png" alt="mini-nas" class="logo-img" />
+      <img src="/logo.png" alt="Mini-NAS" class="logo-img" />
     </div>
-    <h2>mini-nas</h2>
+    <h2>Mini-NAS</h2>
     <p class="subtitle">
       {#if checking}
         正在加载...
