@@ -2,8 +2,10 @@ package com.mininas.client.data.api
 
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.serialization.json.Json
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Response
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import java.util.concurrent.TimeUnit
@@ -15,6 +17,7 @@ import java.util.concurrent.TimeUnit
  */
 class ApiProvider(
     private val tokenProvider: () -> String?,
+    private val onAuthError: (() -> Unit)? = null,
 ) {
     private val json: Json = Json {
         ignoreUnknownKeys = true
@@ -29,6 +32,7 @@ class ApiProvider(
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
         .addInterceptor(authInterceptor)
+        .addInterceptor(authResponseInterceptor())
         .addInterceptor(HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         })
@@ -46,6 +50,14 @@ class ApiProvider(
         val normalized = normalize(rawUrl)
         if (normalized.isBlank()) return
         current = build(normalized)
+    }
+
+    private fun authResponseInterceptor(): Interceptor = Interceptor { chain ->
+        val response = chain.proceed(chain.request())
+        if (response.code == 401) {
+            onAuthError?.invoke()
+        }
+        response
     }
 
     private fun build(baseUrl: String): ApiService {

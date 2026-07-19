@@ -1,6 +1,7 @@
 const BASE = '/api'
 
 let token = localStorage.getItem('token')
+let _onAuthError = null
 
 export function setToken(t) {
   token = t
@@ -16,6 +17,17 @@ export function isAuthenticated() {
   return !!token
 }
 
+export function setOnAuthError(cb) {
+  _onAuthError = cb
+}
+
+function handleAuthError(msg) {
+  token = null
+  localStorage.removeItem('token')
+  if (_onAuthError) _onAuthError()
+  throw new Error(msg || '登录已过期，请重新登录')
+}
+
 async function request(method, path, opts = {}) {
   const headers = { ...opts.headers }
   if (token) headers['Authorization'] = `Bearer ${token}`
@@ -29,6 +41,10 @@ async function request(method, path, opts = {}) {
     body: opts.body,
     signal: opts.signal
   })
+
+  if (res.status === 401) {
+    handleAuthError()
+  }
 
   const ct = res.headers.get('content-type') || ''
   if (ct.includes('application/json')) {
@@ -98,6 +114,9 @@ export function uploadFile(path, file, onProgress) {
     }
 
     xhr.onload = () => {
+      if (xhr.status === 401) {
+        handleAuthError()
+      }
       try {
         const data = JSON.parse(xhr.responseText)
         if (data.ok) resolve(data.data)
@@ -122,6 +141,9 @@ export function downloadFile(path) {
     xhr.setRequestHeader('Authorization', `Bearer ${token}`)
     xhr.responseType = 'blob'
     xhr.onload = () => {
+      if (xhr.status === 401) {
+        handleAuthError()
+      }
       const blob = xhr.response
       const blobUrl = URL.createObjectURL(blob)
       const link = document.createElement('a')

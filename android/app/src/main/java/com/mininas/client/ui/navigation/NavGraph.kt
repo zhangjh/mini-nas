@@ -7,6 +7,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
@@ -23,15 +24,27 @@ import com.mininas.client.ui.preview.PreviewScreen
 import com.mininas.client.ui.settings.SettingsScreen
 import com.mininas.client.ui.storage.StorageScreen
 import com.mininas.client.ui.sync.SyncScreen
+import kotlinx.coroutines.flow.SharedFlow
 
 @Composable
 fun MiniNasNavGraph(
     navController: NavHostController = rememberNavController(),
     startDestination: String,
+    sessionExpired: SharedFlow<Unit>? = null,
 ) {
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
     val showBottomBar = currentRoute in TopRoute.entries.map { it.name.lowercase() }
+
+    if (sessionExpired != null) {
+        LaunchedEffect(Unit) {
+            sessionExpired.collect {
+                navController.navigate(Routes.LOGIN) {
+                    popUpTo(0) { inclusive = true }
+                }
+            }
+        }
+    }
 
     Scaffold(
         bottomBar = {

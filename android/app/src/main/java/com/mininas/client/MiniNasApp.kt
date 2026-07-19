@@ -16,6 +16,8 @@ import com.mininas.client.sync.SyncScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
@@ -37,6 +39,9 @@ class MiniNasApp : Application() {
         private set
     val syncProgress = SyncProgressBus()
 
+    private val _sessionExpired = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val sessionExpired: SharedFlow<Unit> = _sessionExpired
+
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     override fun onCreate() {
@@ -44,7 +49,13 @@ class MiniNasApp : Application() {
         instance = this
         settings = SettingsStore(this)
         syncStore = SyncStore(this)
-        apiProvider = ApiProvider { settings.tokenSync() }
+        apiProvider = ApiProvider(
+            tokenProvider = { settings.tokenSync() },
+            onAuthError = {
+                appScope.launch { settings.clearAuth() }
+                _sessionExpired.tryEmit(Unit)
+            },
+        )
         urlBuilder = UrlBuilder(
             baseUrlProvider = { settings.serverUrlSync() },
             tokenProvider = { settings.tokenSync() },

@@ -5,7 +5,7 @@
     previewFile, searchQuery, searchResults, showSettings, notify } from './lib/stores.js'
   import { setToken, getToken, listFiles, login as apiLogin,
     register as apiRegister, mkdir, deleteFile, renameFile, uploadFile, downloadFile,
-    searchFiles, healthCheck } from './lib/api.js'
+    searchFiles, healthCheck, setOnAuthError } from './lib/api.js'
   import LoginForm from './components/LoginForm.svelte'
   import Breadcrumb from './components/Breadcrumb.svelte'
   import FileList from './components/FileList.svelte'
@@ -24,6 +24,11 @@
   isAuthenticated.subscribe(v => authed = v)
 
   onMount(async () => {
+    setOnAuthError(() => {
+      isAuthenticated.set(false)
+      files.set([])
+      currentPath.set('')
+    })
     if (getToken()) {
       try {
         await healthCheck()

@@ -42,7 +42,7 @@ class MainActivity : ComponentActivity() {
                 val startDest = remember {
                     if (runBlocking { app.settings.getToken() }.isNullOrBlank()) Routes.LOGIN else Routes.FILES
                 }
-                MiniNasNavGraph(startDestination = startDest)
+                MiniNasNavGraph(startDestination = startDest, sessionExpired = app.sessionExpired)
             }
         }
     }
