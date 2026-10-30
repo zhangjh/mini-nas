@@ -785,49 +785,76 @@ sudo usermod -aG render $USER     # 生效需重新登录
 ls /dev/dri/                       # 应有 card1 与 renderD128
 ```
 
-### 11.3 模型入库（git-lfs）
+### 11.3 模型产物（不入库，脚本复现）
+
+产物目录 `server/models/cn-clip-vit-b16/`：
 
 ```
-server/models/cn-clip-vit-b16/
-  image_encoder.onnx     # 328.9 MB  静态 1x3x224x224 -> 1x512
-  text_encoder.onnx      # 389.5 MB  静态 1x64 -> 1x512
-  vocab.txt              # 21130 tokens，行号即 token id
-  meta.json              # 维度/输入名/归一化参数/静态 shape 声明
-  golden.npz             # 0.5 MB 黄金样本，Go 侧对拍用
-  verify.json            # 导出校验报告
+image_encoder.onnx     328.9 MB   静态 1x3x224x224 -> 1x512
+text_encoder.onnx      389.5 MB   静态 1x64 -> 1x512
+vocab.txt              107 KB     21130 tokens，行号即 token id
+meta.json              800 B      维度/输入名/归一化参数/静态 shape 声明
+golden.npz             554 KB     固定输入 + PyTorch 参考输出，Go 侧对拍用
+verify.json            1.3 KB     导出校验报告
 ```
 
-`.gitattributes`：
+**不提交到仓库**，`server/models/` 已在 `.gitignore` 里。
 
-```
-*.onnx filter=lfs diff=lfs merge=lfs -text
-*.npz  filter=lfs diff=lfs merge=lfs -text
-```
+理由：两份 ONNX 合计 718 MB。GitHub 免费 LFS 只有 1 GB 存储 + 1 GB/月流量，
+占 72% 存储，且每次全新 clone 就烧掉约 718 MB 月流量；走 Release 附件又需要
+人工维护。而导出过程完全确定（固定 seed、固定预处理、固定 opset），
+用一条命令就能复现，没有必须入库的理由。
 
-**配额提醒**：两份 ONNX 合计 718 MB。GitHub 免费 LFS 只有 1 GB 存储 + 1 GB/月流量，
-这会占 72%，且每次全新 clone 就消耗掉大部分月流量。若配额紧张，可改为：
-- 只把 `meta.json` / `vocab.txt` / `golden.npz` 入库（< 1 MB），ONNX 走 release 附件
-- 或部署时用 `scripts/export_clip_onnx.py` 现场导出（需 Python + torch，约 4 分钟）
-
-**导出与校验**（`scripts/export_clip_onnx.py`，已实跑验证）：
+**复现**（约 4 分钟，其中下载权重约 100 秒）：
 
 ```bash
-# 全量导出 + 四段校验（数值一致性 / 确定性 / 语义 / GPU 保真度）
-python scripts/export_clip_onnx.py --model /path/to/cnclip-b16 \
-    --out server/models/cn-clip-vit-b16
-
-# 只校验（不加载 torch，用 golden.npz 复算）
-python scripts/export_clip_onnx.py --out server/models/cn-clip-vit-b16 --verify-only
+scripts/setup_model.sh
+# 产物落到 server/models/cn-clip-vit-b16/
 ```
 
-权重获取（HF 不可达时走 ModelScope）：
+脚本做三件事：从 ModelScope 拉 PyTorch 权重 → 导出静态 shape ONNX → 跑四段校验。
+可用环境变量覆盖：`SRC_DIR`（权重缓存）、`OUT_DIR`（产物目录）、`PY`（解释器）、
+`MODEL_ID`（换模型）。
+
+**导出是逐字节可复现的**（固定 seed + 固定 opset + `do_constant_folding`）。实测两次
+独立导出 md5 完全一致，所以「不入库」不会带来版本漂移风险：
+
+```
+158ab9ee5d83d511a8e6b4d74b5946a0  image_encoder.onnx
+78457542dcac33cce82810ac944170ff  text_encoder.onnx
+f642a1682a637cffd0d57e445b820b72  golden.npz
+3b5b76c4aef48ecf8cb3abaafe960f09  vocab.txt
+```
+
+> 注意：md5 一致的前提是 **torch / transformers 版本一致**。换版本后 ONNX 图结构可能
+> 变化（算子融合策略、opset 实现细节），届时 md5 会变但余弦校验仍应通过 ——
+> 所以**以 `verify.json` 的余弦为准，不要以 md5 为准**。上面这组 md5 仅作环境一致性参考。
+
+**接口契约**（Go 侧必须按此实现，`meta.json` 会带同样的字段）：
+
+| 项 | 值 |
+|---|---|
+| 视觉输入 | `pixel_values`，float32，`[1, 3, 224, 224]`，CHW，RGB |
+| 视觉输出 | `image_embeds`，float32，`[1, 512]`，**未归一化** |
+| 文本输入 | `input_ids` + `attention_mask`，int64，`[1, 64]` |
+| 文本输出 | `text_embeds`，float32，`[1, 512]`，**未归一化** |
+| 归一化 | L2 在 Go 侧做，模型输出保持原始尺度 |
+| 预处理 | 短边缩放到 224（BICUBIC）→ 中心裁剪 224×224 → /255 → 减均值/除标准差 |
+| mean | `[0.48145466, 0.4578275, 0.40821073]` |
+| std | `[0.26862954, 0.26130258, 0.27577711]` |
+| 文本长度 | 固定 64，`padding="max_length"`，超长截断 |
+
+**权重来源**（HF 在目标机不可达，hf-mirror 大文件会卡）：
 
 ```bash
 ID=AI-ModelScope/chinese-clip-vit-base-patch16
-for f in config.json preprocessor_config.json vocab.txt pytorch_model.bin; do
-  curl -L "https://www.modelscope.cn/api/v1/models/$ID/repo?Revision=master&FilePath=$f" -o "$f"
-done
+curl -L "https://www.modelscope.cn/api/v1/models/$ID/repo?Revision=master&FilePath=config.json"
+# 完整文件列表：config.json / preprocessor_config.json / vocab.txt / pytorch_model.bin
 ```
+
+目标机上已有一份备份，换机器部署时可省掉下载：
+`/mnt/nas/dev/mini-nas/server/models/cn-clip-vit-b16/`（ONNX 产物）
+`/mnt/nas/dev/mini-nas/.models-src/`（PyTorch 原始权重，719 MB）
 
 ### 11.4 本地开发（Windows，无 gcc）
 
@@ -940,7 +967,7 @@ if cos(got, fx.ImageEmbeds) < 0.999 { fail() } // 直接判定
 | R10 | Go 侧 BERT 分词器与 Python 不一致 | 查询向量偏移，检索质量下降 | 用 `golden.npz` 的 `text_input_ids` 做 token 级对拍，纳入 P2 验收 |
 | R11 | **OpenVINO EP 动态 shape 静默输出错向量**（§2.5） | 检索整体失真且无任何报错 | 模型强制静态 shape；导出脚本内置 GPU 对拍；P2 自检也必须跑 golden 对拍 |
 | R12 | 缩略图缓存键切换为哈希是破坏性变更 | 现有 4,508 个有效缩略图需重建 | ✅ 已随 P2.5 完成，重建约 2 分钟 |
-| R13 | **模型 718 MB 超出 GitHub 免费 LFS 配额舒适区**（1 GB 存储 / 1 GB 月流量） | 全新 clone 失败或超限 | 见 §11.3 的三种处置方案，需用户确认 |
+| R13 | 模型 718 MB 超出 GitHub 免费 LFS 配额舒适区（1 GB 存储 / 1 GB 月流量） | 全新 clone 失败或超限 | ✅ 已决策**不入库**，改 `scripts/setup_model.sh` 一键复现（§11.3） |
 | R14 | `onnxruntime` 与 `onnxruntime-openvino` 同时安装导致版本混装 | 运行时加载到错误主库，随机故障 | 只装 `onnxruntime-openvino`，Dockerfile 里固定版本 |
 
 ---

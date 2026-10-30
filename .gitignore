@@ -43,5 +43,7 @@ server/bin/
 # 工具/项目数据目录
 .workbuddy-ai/
 
-# 注意：models/**/*.onnx 不在此忽略，需用 git-lfs 跟踪
-# （见 docs/design-semantic-index.md §11.3）
+# 模型产物不入库：两份 ONNX 合计 718MB，GitHub 免费 LFS 只有 1GB 存储 / 1GB 月流量。
+# 复现方式：scripts/setup_model.sh（下载权重 + 导出 + 四段校验，约 4 分钟）
+# 接口契约见 docs/design-semantic-index.md §11.3
+server/models/
