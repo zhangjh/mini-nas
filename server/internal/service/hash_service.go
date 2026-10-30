@@ -202,6 +202,48 @@ func (s *HashService) SkipStats() (store.SkipStats, error) {
 	return s.db.GetSkipStats()
 }
 
+// ListSkipsVerified 列出跳过记录，并剔除原件已消失的悬空条目。
+//
+// 裸的 ListSkips 会把悬空记录一并返回：原件被删除后，那条「已去重未落盘」
+// 的登记就没有任何意义了，对外展示会让用户以为文件还在。
+// ListTree 自己会做这层校验，但 API 与统计如果直接用裸查询就会虚高。
+func (s *HashService) ListSkipsVerified(prefix string) ([]model.DedupSkip, error) {
+	skips, err := s.db.ListSkipsUnder(prefix)
+	if err != nil {
+		return nil, err
+	}
+	out := skips[:0]
+	for i := range skips {
+		if s.VerifySkipTarget(&skips[i]) {
+			out = append(out, skips[i])
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// SkipStatsVerified 只统计原件仍然存在的跳过记录。
+//
+// 「节省空间」这个数字只有在原件还在时才成立——原件删了，当初省下的字节
+// 就已经真的省下来了，不该再算进待复用统计里。
+func (s *HashService) SkipStatsVerified() (store.SkipStats, error) {
+	skips, err := s.db.ListSkipsUnder("")
+	if err != nil {
+		return store.SkipStats{}, err
+	}
+	var st store.SkipStats
+	for i := range skips {
+		if !s.VerifySkipTarget(&skips[i]) {
+			continue
+		}
+		st.Count++
+		st.Bytes += skips[i].Size
+	}
+	return st, nil
+}
+
 // VerifySkipTarget 校验跳过记录指向的原件是否仍然存在。
 //
 // 原件被删除后，跳过记录就成了悬空引用——此时该路径既没有真实文件，

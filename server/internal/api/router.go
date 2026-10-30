@@ -81,6 +81,7 @@ func NewRouter(
 		// 缩略图存量补齐（缩略图本身由 GET /thumb 按需生成）
 		r.Post("/thumb/backfill", thumbH.Backfill)
 		r.Post("/thumb/cancel", thumbH.Cancel)
+		r.Post("/thumb/prune", thumbH.Prune)
 		r.Get("/thumb/status", thumbH.Status)
 	})
 

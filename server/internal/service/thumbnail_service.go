@@ -240,15 +240,16 @@ func (s *ThumbnailService) fillOne(srcPath string, force bool) fillResult {
 	return fillGenerated
 }
 
-// PruneOrphans 删除不再对应任何源文件的缓存，返回删除数量。
+// PruneOrphans 删除不再对应任何源文件的缓存，返回删除数量与释放字节数。
 //
 // keep 是需要保留的缓存文件名集合，由调用方遍历源文件后构造。
-func (s *ThumbnailService) PruneOrphans(keep map[string]struct{}) (int, error) {
+func (s *ThumbnailService) PruneOrphans(keep map[string]struct{}) (int, int64, error) {
 	entries, err := os.ReadDir(s.CacheDir)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	removed := 0
+	var freed int64
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -256,11 +257,18 @@ func (s *ThumbnailService) PruneOrphans(keep map[string]struct{}) (int, error) {
 		if _, ok := keep[e.Name()]; ok {
 			continue
 		}
-		if err := os.Remove(filepath.Join(s.CacheDir, e.Name())); err == nil {
+		path := filepath.Join(s.CacheDir, e.Name())
+		// 先取大小再删；Info 失败就当作 0 字节，不影响清理。
+		var size int64
+		if info, err := e.Info(); err == nil {
+			size = info.Size()
+		}
+		if err := os.Remove(path); err == nil {
 			removed++
+			freed += size
 		}
 	}
-	return removed, nil
+	return removed, freed, nil
 }
 
 // Ensure 强制重建并返回缓存路径，用于调试与自检。

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -16,6 +17,23 @@ import (
 	"github.com/zhangjh/mini-nas/server/internal/model"
 	"github.com/zhangjh/mini-nas/server/internal/service"
 )
+
+// writeFileError 把文件服务返回的错误映射成合适的状态码。
+//
+// 之前所有错误一律回 500，把「客户端传错路径」和「服务端真出故障」混为一谈，
+// 前端只能显示一句无信息量的错误。挂载点不存在属于请求错误（400）——
+// 典型场景是在根视图（没有选中挂载）直接上传或建目录；
+// 路径不存在属于资源不存在（404）。
+func writeFileError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, service.ErrMountNotFound):
+		status = http.StatusBadRequest
+	case errors.Is(err, os.ErrNotExist):
+		status = http.StatusNotFound
+	}
+	writeJSON(w, status, model.APIResponse{OK: false, Error: err.Error()})
+}
 
 type FileHandler struct {
 	fileSvc  *service.FileService
@@ -57,9 +75,7 @@ func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	fl, err := h.fileSvc.ListDir(path, page, pageSize, sortBy, sortDesc)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: fl})
@@ -84,9 +100,7 @@ func (h *FileHandler) Tree(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	files, err := h.fileSvc.ListTree(path)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: files})
@@ -120,9 +134,7 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	// 字节才能得到。暂存/提交分离避免了重复读取上传流。
 	stage, err := h.fileSvc.StageFile(targetPath, file)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 	defer stage.Discard()
@@ -153,9 +165,7 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := stage.Commit(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 
@@ -285,9 +295,7 @@ func (h *FileHandler) Mkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.fileSvc.Mkdir(req.Path); err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
@@ -304,9 +312,7 @@ func (h *FileHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.fileSvc.Delete(req.Path); err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 	h.invalidateFingerprints(req.Path)
@@ -366,9 +372,7 @@ func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	dir := filepath.Dir(req.Path)
 	newPath := filepath.Join(dir, req.NewName)
 	if err := h.fileSvc.Rename(req.Path, newPath); err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 	h.invalidateFingerprints(req.Path)
@@ -388,9 +392,7 @@ func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.fileSvc.Move(req.Paths, req.Dest); err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 	for _, p := range req.Paths {
@@ -413,9 +415,7 @@ func (h *FileHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.fileSvc.Copy(req.Paths, req.Dest); err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 	// 复制会在目标目录生成新文件，若该路径此前有缓存需一并失效
@@ -460,9 +460,7 @@ func (h *FileHandler) ListSystemDirs(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := os.ReadDir(hostPath)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
-			OK: false, Error: err.Error(),
-		})
+		writeFileError(w, err)
 		return
 	}
 

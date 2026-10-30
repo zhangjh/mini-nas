@@ -163,7 +163,9 @@ func (h *DedupHandler) Skips(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prefix := r.URL.Query().Get("path")
-	items, err := h.hashSvc.ListSkips(prefix)
+	// 用校验后的查询：原件已消失的悬空记录不再对外展示，
+	// 否则客户端会以为这些文件仍然可取。
+	items, err := h.hashSvc.ListSkipsVerified(prefix)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, model.APIResponse{OK: false, Error: err.Error()})
 		return

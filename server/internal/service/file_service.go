@@ -3,8 +3,10 @@ package service
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,6 +21,13 @@ import (
 type fileLock struct {
 	mu sync.RWMutex
 }
+
+// ErrMountNotFound 表示虚拟路径的第一段不是已注册的挂载点。
+//
+// 这是**调用方给错了路径**，不是服务端故障，API 层应映射成 400 而不是 500。
+// 典型场景：客户端在根视图（此时没有选中任何挂载）直接上传或建目录，
+// 传过来的路径不带挂载名前缀。
+var ErrMountNotFound = errors.New("mount not found")
 
 // virtualJoin 拼接虚拟路径。
 //
@@ -133,7 +142,7 @@ func (s *FileService) ListDir(virtualPath string, page, pageSize int, sortBy str
 
 	mount, mountName, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
-		return nil, os.ErrNotExist
+		return nil, ErrMountNotFound
 	}
 
 	absDir := s.mountPath(mount, rel)
@@ -256,7 +265,7 @@ func (s *FileService) GetFileInfo(virtualPath string) (*model.FileInfo, error) {
 
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
-		return nil, os.ErrNotExist
+		return nil, ErrMountNotFound
 	}
 	abs := s.mountPath(mount, rel)
 	info, err := os.Stat(abs)
@@ -288,28 +297,43 @@ func (s *FileService) GetFileInfo(virtualPath string) (*model.FileInfo, error) {
 func (s *FileService) ListTree(virtualPath string) ([]model.FileInfo, error) {
 	mount, mountName, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
-		return nil, os.ErrNotExist
+		return nil, ErrMountNotFound
 	}
 
 	absDir := s.mountPath(mount, rel)
 
-	seen := make(map[string]struct{})
+	// seen 只用于给下面的 dedup_skip 条目去重。未注入 skipIndex 时没人读它，
+	// 而大库下单是这张 map 就要几十万次插入 + 几十 MB 内存，故按需分配。
+	var seen map[string]struct{}
+	if s.skipIndex != nil {
+		seen = make(map[string]struct{})
+	}
+
 	var files []model.FileInfo
 
 	if _, err := os.Stat(absDir); err == nil {
-		walkErr := filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
+		// WalkDir 直接复用 ReadDir 拿到的类型信息，目录条目不再额外 Lstat。
+		// 文件仍需一次 Info() 取大小与 mtime（getdents 不返回这些），
+		// 所以收益主要在目录密集的树上，不是数量级的改善。
+		walkErr := filepath.WalkDir(absDir, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil // skip unreadable entries
 			}
-			if info.IsDir() {
+			if d.IsDir() {
 				return nil
 			}
 			relToWalk, err := filepath.Rel(absDir, p)
 			if err != nil {
 				return nil
 			}
+			info, err := d.Info()
+			if err != nil {
+				return nil // 遍历期间被删除，跳过即可
+			}
 			virtualFile := virtualJoin(mountName, rel, relToWalk)
-			seen[virtualFile] = struct{}{}
+			if seen != nil {
+				seen[virtualFile] = struct{}{}
+			}
 			files = append(files, model.FileInfo{
 				Name:    info.Name(),
 				Path:    virtualFile,
@@ -360,7 +384,7 @@ func (s *FileService) ListTree(virtualPath string) ([]model.FileInfo, error) {
 func (s *FileService) Mkdir(virtualPath string) error {
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
-		return fmt.Errorf("mount not found")
+		return ErrMountNotFound
 	}
 	return os.MkdirAll(s.mountPath(mount, rel), 0755)
 }
@@ -368,7 +392,7 @@ func (s *FileService) Mkdir(virtualPath string) error {
 func (s *FileService) Delete(virtualPath string) error {
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
-		return fmt.Errorf("mount not found")
+		return ErrMountNotFound
 	}
 	return os.RemoveAll(s.mountPath(mount, rel))
 }
@@ -377,7 +401,7 @@ func (s *FileService) Rename(oldPath, newPath string) error {
 	oldMount, _, oldRel := s.mountSvc.ResolveMount(oldPath)
 	newMount, _, newRel := s.mountSvc.ResolveMount(newPath)
 	if oldMount == nil || newMount == nil {
-		return fmt.Errorf("mount not found")
+		return ErrMountNotFound
 	}
 
 	oldAbs := s.mountPath(oldMount, oldRel)
@@ -391,7 +415,7 @@ func (s *FileService) Rename(oldPath, newPath string) error {
 func (s *FileService) Move(paths []string, destDir string) error {
 	destMount, _, destRel := s.mountSvc.ResolveMount(destDir)
 	if destMount == nil {
-		return fmt.Errorf("destination mount not found")
+		return fmt.Errorf("destination %w", ErrMountNotFound)
 	}
 	destAbs := s.mountPath(destMount, destRel)
 	os.MkdirAll(destAbs, 0755)
@@ -413,7 +437,7 @@ func (s *FileService) Move(paths []string, destDir string) error {
 func (s *FileService) Copy(srcPaths []string, destDir string) error {
 	destMount, _, destRel := s.mountSvc.ResolveMount(destDir)
 	if destMount == nil {
-		return fmt.Errorf("destination mount not found")
+		return fmt.Errorf("destination %w", ErrMountNotFound)
 	}
 	destAbs := s.mountPath(destMount, destRel)
 	os.MkdirAll(destAbs, 0755)
@@ -435,7 +459,7 @@ func (s *FileService) Copy(srcPaths []string, destDir string) error {
 func (s *FileService) WriteFile(virtualPath string, reader io.Reader) (int64, error) {
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
-		return 0, fmt.Errorf("mount not found")
+		return 0, ErrMountNotFound
 	}
 
 	abs := s.mountPath(mount, rel)
@@ -485,7 +509,7 @@ type PendingWrite struct {
 func (s *FileService) StageFile(virtualPath string, reader io.Reader) (*PendingWrite, error) {
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
-		return nil, fmt.Errorf("mount not found")
+		return nil, ErrMountNotFound
 	}
 
 	abs := s.mountPath(mount, rel)
@@ -552,7 +576,7 @@ func (p *PendingWrite) Discard() {
 func (s *FileService) OpenFile(virtualPath string) (*os.File, error) {
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
-		return nil, fmt.Errorf("mount not found")
+		return nil, ErrMountNotFound
 	}
 	return os.Open(s.mountPath(mount, rel))
 }

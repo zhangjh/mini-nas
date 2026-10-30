@@ -77,7 +77,7 @@ func (h *ThumbHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }
 
-// Status 返回缓存覆盖情况。会遍历全部挂载，大库下耗时较长。
+// Status 返回缓存覆盖情况。源清单有 30 秒缓存，重复调用很快。
 func (h *ThumbHandler) Status(w http.ResponseWriter, r *http.Request) {
 	if h.jobs == nil {
 		writeJSON(w, http.StatusServiceUnavailable, model.APIResponse{
@@ -86,4 +86,25 @@ func (h *ThumbHandler) Status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: h.jobs.Status()})
+}
+
+// Prune 清理孤儿缓存，只删不生成。
+//
+// 与补齐任务末尾的顺带清理不同，这里不生成任何新缩略图，
+// 适用于换过缓存键格式或源文件被批量删除后的收尾。
+func (h *ThumbHandler) Prune(w http.ResponseWriter, r *http.Request) {
+	if h.jobs == nil {
+		writeJSON(w, http.StatusServiceUnavailable, model.APIResponse{
+			OK: false, Error: "thumbnail service disabled",
+		})
+		return
+	}
+	res, err := h.jobs.Prune()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, model.APIResponse{OK: true, Data: res})
 }

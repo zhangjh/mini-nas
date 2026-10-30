@@ -18,6 +18,14 @@ import (
 // JobTypeThumbBackfill 是批量补齐缩略图的任务类型。
 const JobTypeThumbBackfill = "thumb_backfill"
 
+// sourceTTL 是图片源清单的缓存有效期。
+//
+// Status() 必须遍历全部挂载才能算出 images/cached，6 万文件的库单次要 8 秒以上。
+// 这个接口只服务于状态展示，几十秒的陈旧度无所谓，所以加一层短期缓存。
+// 同时复用同一把锁把并发的全量遍历串行化——否则前端多开几个页面就能把
+// NAS 机械盘打满。
+const sourceTTL = 30 * time.Second
+
 // ThumbJobService 把缩略图批量补齐包装成可观测、可取消的后台任务。
 //
 // 与 DedupService 一样，同一时刻只允许一个补齐任务在跑；任务进度写进 job 表，
@@ -34,6 +42,12 @@ type ThumbJobService struct {
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
+
+	// 图片源清单的短期缓存，见 sourceTTL。
+	srcMu    sync.Mutex
+	srcCache []string
+	srcAt    time.Time
+	srcValid bool
 }
 
 func NewThumbJobService(
@@ -112,38 +126,63 @@ func (s *ThumbJobService) Cancel(jobID string) bool {
 	return true
 }
 
-// Status 汇总当前缓存规模，供前端展示。
+// ThumbStatus 汇总当前缓存规模，供前端展示。
 type ThumbStatus struct {
-	Mounts     int        `json:"mounts"`
-	Images     int        `json:"images"`
-	Cached     int        `json:"cached"`
-	Orphans    int        `json:"orphans"`
-	CacheBytes int64      `json:"cache_bytes"`
-	Running    *model.Job `json:"running"`
+	Mounts     int   `json:"mounts"`
+	Images     int   `json:"images"`
+	Cached     int   `json:"cached"`
+	Orphans    int   `json:"orphans"`
+	CacheBytes int64 `json:"cache_bytes"`
+	// OrphanBytes 是不再对应任何源文件的缓存占用。
+	//
+	// 单独报出来而不是并进 CacheBytes：CacheBytes 的语义是「有效缓存占多少」，
+	// 混进孤儿会让「缓存命中率」之类的推算失真；但只报有效部分又会让
+	// 磁盘实际占用被低估（历史键格式迁移后就出现过报 12KB、实占 88MB）。
+	// 两个数都给出，调用方相加即可得到真实占用。
+	OrphanBytes int64      `json:"orphan_bytes"`
+	Running     *model.Job `json:"running"`
 }
 
-// Status 统计缓存现状。会遍历全部挂载，大库下有一定开销，仅供手动刷新。
+// Status 统计缓存现状。
+//
+// 源清单走 30 秒缓存，缓存目录只 ReadDir 一次后与源集合求交，
+// 不再对每个源文件单独 Stat——大库下这是从 8 秒降到几十毫秒的关键。
 func (s *ThumbJobService) Status() ThumbStatus {
 	var st ThumbStatus
-	srcs := s.collectSources()
+	srcs := s.sourcesSnapshot()
 	st.Mounts = len(s.mounts.List())
 	st.Images = len(srcs)
 
 	keep := make(map[string]struct{}, len(srcs))
 	for _, p := range srcs {
-		dst := s.thumbs.CachePath(p)
-		keep[filepath.Base(dst)] = struct{}{}
-		if info, err := os.Stat(dst); err == nil {
-			st.Cached++
-			st.CacheBytes += info.Size()
+		keep[filepath.Base(s.thumbs.CachePath(p))] = struct{}{}
+	}
+
+	// 缓存目录一次读全，键为文件名、值为大小。
+	cached := make(map[string]int64)
+	if entries, err := os.ReadDir(s.thumbs.CacheDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			cached[e.Name()] = info.Size()
 		}
 	}
 
-	if entries, err := os.ReadDir(s.thumbs.CacheDir); err == nil {
-		for _, e := range entries {
-			if _, ok := keep[e.Name()]; !ok && !e.IsDir() {
-				st.Orphans++
-			}
+	for name := range keep {
+		if size, ok := cached[name]; ok {
+			st.Cached++
+			st.CacheBytes += size
+		}
+	}
+	for name, size := range cached {
+		if _, ok := keep[name]; !ok {
+			st.Orphans++
+			st.OrphanBytes += size
 		}
 	}
 
@@ -157,6 +196,48 @@ func (s *ThumbJobService) Status() ThumbStatus {
 	s.mu.Unlock()
 
 	return st
+}
+
+// sourcesSnapshot 返回缓存的图片源清单，超过 sourceTTL 才重新遍历。
+func (s *ThumbJobService) sourcesSnapshot() []string {
+	s.srcMu.Lock()
+	defer s.srcMu.Unlock()
+
+	if s.srcValid && time.Since(s.srcAt) < sourceTTL {
+		return s.srcCache
+	}
+	srcs := s.collectSources()
+	s.srcCache = srcs
+	s.srcAt = time.Now()
+	s.srcValid = true
+	return srcs
+}
+
+// PruneResult 是一次孤儿缓存清理的结果。
+type PruneResult struct {
+	Removed    int   `json:"removed"`
+	FreedBytes int64 `json:"freed_bytes"`
+	Kept       int   `json:"kept"`
+}
+
+// Prune 清理不再对应任何源文件的缩略图缓存，不生成任何新缩略图。
+//
+// 补齐任务结束时也会顺带清理（受 prune_orphans 配置控制），但那需要先跑完
+// 整个补齐流程；换了缓存键格式、或源文件批量删除之后，用户需要的是一个
+// 只清不生成的入口。
+func (s *ThumbJobService) Prune() (PruneResult, error) {
+	srcs := s.collectSources()
+	keep := make(map[string]struct{}, len(srcs))
+	for _, p := range srcs {
+		keep[filepath.Base(s.thumbs.CachePath(p))] = struct{}{}
+	}
+
+	removed, freed, err := s.thumbs.PruneOrphans(keep)
+	if err != nil {
+		return PruneResult{}, err
+	}
+	// 源清单没变，但缓存目录变了；下次 Status 会重新 ReadDir，无需失效。
+	return PruneResult{Removed: removed, FreedBytes: freed, Kept: len(keep)}, nil
 }
 
 // collectSources 遍历所有挂载，收集可解码的图片绝对路径。
@@ -213,7 +294,7 @@ func (s *ThumbJobService) run(ctx context.Context, jobID string, force bool) err
 		for _, p := range srcs {
 			keep[filepath.Base(s.thumbs.CachePath(p))] = struct{}{}
 		}
-		if n, err := s.thumbs.PruneOrphans(keep); err != nil {
+		if n, _, err := s.thumbs.PruneOrphans(keep); err != nil {
 			log.Printf("prune thumbnails: %v", err)
 		} else if n > 0 {
 			msg += "，清理孤儿 " + strconv.Itoa(n)

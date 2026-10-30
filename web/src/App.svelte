@@ -124,8 +124,14 @@
   }
 
   async function handleNewFolder(name) {
+    // 根视图是挂载点列表，不是真实目录，服务端没有可建的落点。
+    if (!$currentPath) {
+      notify('请先进入一个挂载目录', 'error')
+      return
+    }
+    if (!name) return
     try {
-      const path = $currentPath ? `${$currentPath}/${name}` : name
+      const path = `${$currentPath}/${name}`
       await mkdir(path)
       notify('目录已创建', 'success')
       loadDir()
@@ -235,7 +241,12 @@
         </div>
       </div>
       <div class="header-right">
-        <button class="btn btn-ghost btn-sm" on:click={() => $showUpload = true}>
+        <button
+          class="btn btn-ghost btn-sm"
+          on:click={() => $showUpload = true}
+          disabled={!$currentPath}
+          title={$currentPath ? '上传文件' : '请先进入一个挂载目录'}
+        >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           上传
         </button>
@@ -255,7 +266,12 @@
         <Breadcrumb currentPath={$currentPath} on:navigate={e => handleNavigate(e.detail)} />
       </div>
       <div class="toolbar-actions">
-        <button class="btn btn-ghost btn-sm" on:click={() => handleNewFolder(prompt('文件夹名称：') || '')}>
+        <button
+          class="btn btn-ghost btn-sm"
+          on:click={() => handleNewFolder(prompt('文件夹名称：') || '')}
+          disabled={!$currentPath}
+          title={$currentPath ? '新建文件夹' : '根目录由挂载点构成，请先进入一个挂载目录'}
+        >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
           新建文件夹
         </button>

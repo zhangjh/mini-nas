@@ -183,12 +183,18 @@ func (s *DedupService) ListJobs(limit int) ([]model.Job, error) {
 }
 
 // Stats 汇总重复分组与去重跳过的情况。
+//
+// 跳过统计走 VerifySkipTarget 校验后的口径：原件已被删除的悬空记录不计入，
+// 否则「已节省字节」会在原件删掉之后永久虚高。
 func (s *DedupService) Stats() (store.GroupStats, store.SkipStats, error) {
 	g, err := s.db.GetGroupStats()
 	if err != nil {
 		return g, store.SkipStats{}, err
 	}
-	k, err := s.db.GetSkipStats()
+	if s.hashSvc == nil {
+		return g, store.SkipStats{}, nil
+	}
+	k, err := s.hashSvc.SkipStatsVerified()
 	return g, k, err
 }
 
