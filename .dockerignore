@@ -1,0 +1,24 @@
+# 构建上下文裁剪。
+# 没有这个文件时 `COPY server/ .` 会把 server/models（720MB 模型权重）和
+# server/data 一起塞进构建上下文，构建慢且毫无意义 —— 运行时模型是挂载进去的。
+
+.git
+.gitignore
+.github
+android
+docs
+scripts
+web
+data
+
+# 服务端不需要进构建上下文的重资产
+server/models
+server/data
+server/mini-nas-server
+server/*.tmp
+
+# 杂项
+*.log
+*.md
+.DS_Store
+Thumbs.db
