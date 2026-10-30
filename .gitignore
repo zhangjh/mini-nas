@@ -32,7 +32,6 @@ android/.cxx/
 *.jks
 
 backup/
-docs/
 gradle_temp/
 
 # 构建产物
