@@ -121,3 +121,52 @@ type Job struct {
 	StartedAt  int64    `json:"started_at"`
 	FinishedAt int64    `json:"finished_at"`
 }
+
+// ---- 语义索引 ----
+
+// 媒体资产的索引状态。
+const (
+	IndexPending = "PENDING"
+	IndexDone    = "DONE"
+	IndexFailed  = "FAILED"
+	IndexSkipped = "SKIPPED"
+)
+
+// 索引来源：命中缩略图缓存，或直接解原图。
+const (
+	SourceThumb    = "thumb"
+	SourceOriginal = "original"
+)
+
+// MediaAsset 是参与语义索引的图片资产。
+//
+// Path 是虚拟路径（mount/rel），与 file_hash / dedup_skip 一致，不存宿主绝对路径。
+type MediaAsset struct {
+	ID            int64  `json:"id"`
+	Path          string `json:"path"`
+	Mime          string `json:"mime"`
+	Size          int64  `json:"size"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
+	MTime         int64  `json:"mtime"`
+	Bucket        string `json:"bucket"`
+	IndexState    string `json:"index_state"`
+	LastIndexedAt int64  `json:"last_indexed_at"`
+	// ChangeToken 是 "size:mtime"，与库中一致则跳过重算。
+	ChangeToken string `json:"change_token"`
+	// Source 记录这张图是从缩略图还是原图索引的，便于排查质量异常。
+	Source string `json:"source"`
+	// Error 记录失败原因，失败资产不会中断整个任务。
+	Error string `json:"error"`
+}
+
+// SearchHit 是一条检索结果。
+type SearchHit struct {
+	Path     string  `json:"path"`
+	Score    float64 `json:"score"`
+	ThumbURL string  `json:"thumb_url"`
+	Width    int     `json:"width,omitempty"`
+	Height   int     `json:"height,omitempty"`
+	Size     int64   `json:"size,omitempty"`
+	MTime    int64   `json:"mtime,omitempty"`
+}

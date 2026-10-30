@@ -5,20 +5,33 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/zhangjh/mini-nas/server/internal/ai"
 	"github.com/zhangjh/mini-nas/server/internal/config"
 	"github.com/zhangjh/mini-nas/server/internal/service"
 )
 
-func NewRouter(
-	cfg *config.Config,
-	fileSvc *service.FileService,
-	thumbSvc *service.ThumbnailService,
-	mountSvc *service.MountService,
-	userSvc *service.UserService,
-	hashSvc *service.HashService,
-	dedupSvc *service.DedupService,
-	thumbJobs *service.ThumbJobService,
-) http.Handler {
+// Deps 汇总路由需要的全部依赖。
+//
+// 用结构体而不是继续加参数：路由依赖已经超过十个，位置参数一旦顺序写错
+// 编译器不会报错（同类型参数可互换），排查成本极高。
+type Deps struct {
+	Config    *config.Config
+	Files     *service.FileService
+	Thumbs    *service.ThumbnailService
+	Mounts    *service.MountService
+	Users     *service.UserService
+	Hashes    *service.HashService
+	Dedup     *service.DedupService
+	ThumbJobs *service.ThumbJobService
+	// Index / Search / AI 三者同时为 nil（AI 未启用）或同时非 nil。
+	Index  *service.IndexService
+	Search *service.SearchService
+	AI     *ai.Engine
+}
+
+func NewRouter(d Deps) http.Handler {
+	cfg := d.Config
+
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)
@@ -33,11 +46,13 @@ func NewRouter(
 	})
 
 	authM := NewAuthMiddleware(cfg.JWTSecret)
-	authH := NewAuthHandler(authM, userSvc)
-	fileH := NewFileHandler(fileSvc, thumbSvc, hashSvc, cfg.Dedup, cfg.HostRoot)
-	mountH := NewMountHandler(mountSvc)
-	dedupH := NewDedupHandler(dedupSvc, hashSvc, cfg.Dedup.Enabled)
-	thumbH := NewThumbHandler(thumbJobs)
+	authH := NewAuthHandler(authM, d.Users)
+	fileH := NewFileHandler(d.Files, d.Thumbs, d.Hashes, d.Index, cfg.Dedup, cfg.HostRoot)
+	mountH := NewMountHandler(d.Mounts)
+	dedupH := NewDedupHandler(d.Dedup, d.Hashes, cfg.Dedup.Enabled)
+	thumbH := NewThumbHandler(d.ThumbJobs)
+	indexH := NewIndexHandler(d.Index, d.AI)
+	searchH := NewSearchHandler(d.Search)
 
 	r.Get("/api/auth/status", authH.Status)
 	r.Post("/api/auth/login", authH.Login)
@@ -83,6 +98,18 @@ func NewRouter(
 		r.Post("/thumb/cancel", thumbH.Cancel)
 		r.Post("/thumb/prune", thumbH.Prune)
 		r.Get("/thumb/status", thumbH.Status)
+
+		// 语义索引
+		r.Get("/index/status", indexH.Status)
+		r.Get("/index/health", indexH.Health)
+		r.Post("/index/scan", indexH.Scan)
+		r.Post("/index/cancel", indexH.Cancel)
+		r.Get("/index/jobs", indexH.Jobs)
+		r.Get("/index/job", indexH.Job)
+
+		// 语义检索
+		r.Post("/search/semantic", searchH.Semantic)
+		r.Post("/search/similar", searchH.Similar)
 	})
 
 	return r

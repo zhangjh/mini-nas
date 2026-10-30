@@ -426,8 +426,12 @@ def main() -> None:
         },
         "normalize": "l2",
         "preprocess": {
-            "resize": "shortest_side",
-            "crop": "center",
+            # 与 preprocessor_config.json 一致：do_center_crop=false，直接拉伸到
+            # size×size。写成 shortest_side/center 会误导 Go 侧实现（§7.2 有 A/B 实测）。
+            "resize": "stretch",
+            "size": [size, size],
+            "resample": "bicubic",
+            "crop": "none",
             "mean": [0.48145466, 0.4578275, 0.40821073],
             "std": [0.26862954, 0.26130258, 0.27577711],
         },

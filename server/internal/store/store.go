@@ -146,5 +146,9 @@ func (d *DB) migrate() error {
 	if _, err := d.Exec(schema); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
+	// 已有库不会重建表，新增字段走 ALTER（幂等）。
+	if err := d.migrateMedia(); err != nil {
+		return err
+	}
 	return nil
 }

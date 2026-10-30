@@ -278,3 +278,35 @@ func (s *ThumbnailService) Ensure(srcPath string) (string, error) {
 	}
 	return s.generate(srcPath)
 }
+
+// Lookup 只在缓存已新鲜时返回路径，**不触发任何生成**。
+//
+// 索引流水线需要区分「直接用缩略图」与「解原图并回写」：若这里走 Get，
+// 缺缓存时 Get 会先解一次原图生成缩略图，索引侧再解一次缩略图，
+// 一张图要付两次解码成本。
+func (s *ThumbnailService) Lookup(srcPath string) (string, bool) {
+	if srcPath == "" {
+		return "", false
+	}
+	dst := s.CachePath(srcPath)
+	if s.fresh(srcPath, dst) {
+		return dst, true
+	}
+	return "", false
+}
+
+// WriteFrom 用已解码的图像直接写缓存，避免再次解码。
+//
+// 语义索引在缩略图缺失时会解码原图；同一张图再解一次只为生成缩略图
+// 是纯浪费（12MP 一次 17~400ms，取决于解码后端），所以索引侧把解好的
+// image.Image 交回来，由这里做缩放与编码。
+func (s *ThumbnailService) WriteFrom(img image.Image, srcPath string) (string, error) {
+	if img == nil || srcPath == "" {
+		return "", fmt.Errorf("empty image or path")
+	}
+	dst := s.CachePath(srcPath)
+	if err := s.writeJPEG(s.fit(img), dst); err != nil {
+		return "", err
+	}
+	return dst, nil
+}

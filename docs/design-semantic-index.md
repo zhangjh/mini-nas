@@ -148,9 +148,10 @@ P2 的四个硬约束，写代码前先记住：
 | 12 MP 原图（Go 全解码） | 409 | 121 | 530 ms | 1.9 img/s | 124 min |
 | HEIC 12 MP | 676 | 121 | 797 ms | 1.3 img/s | 3 h |
 
-> **基准口径说明**：上述端到端测试的预处理用的是「直接 resize 到 224×224」（拉伸）。
-> 正确的 CLIP 预处理是「短边缩放到 224 + 中心裁剪 224×224」。两者耗时差异可忽略
-> （多一次裁剪，几微秒），但**实现时必须用后者**，否则宽高比失真会影响检索质量。
+> **基准口径说明**：上述端到端测试的预处理用的是「直接 resize 到 224×224」（拉伸），
+> 与最终实现一致。注意这与 OpenAI CLIP 的惯例（短边缩放 + 中心裁剪）相反，
+> 依据是随权重发布的 `preprocessor_config.json` 里 `do_center_crop: false`，
+> 以及 §7.2 的 A/B 实测（拉伸的图文区分度更高）。**不要凭直觉改成裁剪。**
 
 ### 2.4 加速路径探索结论
 
@@ -616,7 +617,7 @@ Web 请求与索引共存时，GPU 推理会抢占；实测单张 121 ms 的延�
 ```
 query "海边日落"
   → 分词（HuggingFace tokenizer，Go 侧实现 BPE）
-  → 文本塔推理（CPU，10~30 ms）
+  → 文本塔推理（GPU FP16 19.4 ms；GPU 不可用时退回 CPU 52 ms）
   → 512 维查询向量（L2 归一化）
   → 与内存中所有 model_id 匹配的向量做点积（= 余弦，因为都已归一化）
   → 排序 → 取 top-K → 过滤 min_score → 校验文件仍存在
@@ -646,7 +647,8 @@ CLIP 的图文余弦分数分布与视觉相似度不同：
 首次检索时把向量全量加载进内存（`map[modelID]*VectorIndex`），之后增量维护：
 
 - 索引任务每写入一批 → 追加到内存索引
-- 进程启动时惰性加载（首次检索触发），避免拖慢启动
+- 进程启动后**后台预热**（`SearchService.Warmup`），不阻塞启动；预热完成前到来的
+  检索请求会走同一把锁做同步加载，不会读到半截索引
 
 ---
 
@@ -666,7 +668,7 @@ Content-Type: application/json
   "ok": true,
   "data": {
     "items": [
-      { "path": "照片/2024/IMG_1234.jpg", "score": 0.312, "thumb_url": "/api/files/thumbnail?path=..." }
+      { "path": "照片/2024/IMG_1234.jpg", "score": 0.312, "thumb_url": "/api/thumb?path=..." }
     ],
     "took_ms": 18,
     "total_candidates": 13978
@@ -760,44 +762,35 @@ GPU 路径出问题时不会报错，只会给出错向量（§2.5），没有�
 
 ## 11. 构建与部署
 
-### 11.1 镜像改造（重要）
+### 11.1 镜像改造（已落地）
 
-当前 `server/Dockerfile.server` 是 **alpine + `CGO_ENABLED=0`**，无法承载
-onnxruntime / OpenVINO / libjpeg-turbo / libheif（均为 glibc 构建）。必须改为 Debian 基底。
+原 `server/Dockerfile.server` 是 **alpine + `CGO_ENABLED=0`**，无法承载
+onnxruntime / OpenVINO / libjpeg-turbo（均为 glibc 构建）。现已改为 Debian 基底，
+实际文件见 `server/Dockerfile.server`，关键差异如下：
+
+| 项 | 做法 | 原因 |
+|---|---|---|
+| 基底 | `golang:1.22-bookworm` → `debian:bookworm-slim` | 只有 glibc 基底能加载 ORT/OpenVINO |
+| 解码 | `-tags libjpeg` + `libjpeg62-turbo-dev` | DCT 降采样，12MP JPEG 17ms vs 380ms |
+| 运行库 | 独立 `ortlibs` 阶段 `pip install onnxruntime-openvino` 后拷 `.so` | 构建期确定版本，运行镜像不带 Python |
+| iGPU 驱动 | 安装失败只告警，不失败构建 | 降级 CPU 仍可用，`/api/index/health` 暴露 `device` |
 
 ```dockerfile
-# ---- 构建阶段 ----
+FROM python:3.12-slim AS ortlibs
+ARG ORT_VERSION=1.24.1
+RUN pip install --no-cache-dir --target /ortpkg onnxruntime-openvino==${ORT_VERSION} \
+ && mkdir -p /opt/ort && cp -a /ortpkg/onnxruntime/capi/*.so* /opt/ort/
+
 FROM golang:1.22-bookworm AS builder
-WORKDIR /build
-ENV GOPROXY=https://goproxy.cn,direct
+RUN apt-get update && apt-get install -y --no-install-recommends libjpeg62-turbo-dev
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ .
-RUN CGO_ENABLED=1 go build -tags cgo -ldflags="-s -w" -o mini-nas-server ./cmd/server
+RUN CGO_ENABLED=1 go build -tags libjpeg -ldflags="-s -w" -o mini-nas-server ./cmd/server
 
-# ---- 运行阶段 ----
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates tzdata \
-      libjpeg62-turbo libheif1 \
-      intel-opencl-icd libze-intel-gpu1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# onnxruntime + OpenVINO 运行库：直接从官方 wheel 取，不必自编译
-# 依赖 py3-none-manylinux wheel，内含 libonnxruntime.so / libopenvino*.so 全套
-COPY --from=python:3.12-slim /tmp/ort /opt/ort
+COPY --from=ortlibs /opt/ort /opt/ort
 ENV LD_LIBRARY_PATH=/opt/ort
-
-WORKDIR /app
-COPY --from=builder /build/mini-nas-server .
-ENTRYPOINT ["./mini-nas-server", "-config", "/data/config.json", "-data", "/data"]
-```
-
-取运行库的做法（构建机上执行一次，产物入库或走 CI 缓存）：
-
-```bash
-pip download onnxruntime-openvino==1.24.1 --no-deps -d /tmp/ortwheel
-cd /tmp/ortwheel && unzip -j *.whl 'onnxruntime/capi/*.so*' -d /tmp/ort
 ```
 
 > 注意：**不要同时装 `onnxruntime` 和 `onnxruntime-openvino`**。两者会把不同版本的
@@ -938,8 +931,12 @@ curl -L "https://www.modelscope.cn/api/v1/models/$ID/repo?Revision=master&FilePa
 
 ```bash
 go build ./...                              # 默认 !cgo，AI 返回 503，其余功能正常
-go build -tags cgo ./cmd/server             # 需 gcc + onnxruntime，仅 Linux
+CGO_ENABLED=1 go build -tags libjpeg ./cmd/server   # 需 gcc + jpeglib.h + onnxruntime，仅 Linux
 ```
+
+`make build-server` / `make build-server-cgo` 分别对应上面两条。改完 `go.mod`
+相关代码后必须用 `make tidy`（内部固定 `GOOS=linux CGO_ENABLED=1`）整理依赖，
+否则 `onnxruntime_go` 只在 cgo 文件里被 import，会被当成未使用依赖删掉。
 
 ---
 
@@ -951,11 +948,26 @@ go build -tags cgo ./cmd/server             # 需 gcc + onnxruntime，仅 Linux
 | **P0.1** | 全新部署默认挂载点修复 | ✅ 已完成（`d73a360`） | `e2e_fresh_deploy.sh` 通过 |
 | **P1** | 模型导出与入库 | ✅ 导出已完成并校验 | ONNX 输出与 PyTorch 余弦 > 0.999（实测 1.00000000 / 0.99999988） |
 | **P2.5** | 缩略图子系统改造（§6） | ✅ 已完成（`34d8f2e`） | 覆盖率 100%；覆盖后不再返回旧图；backfill 可跑 |
-| **P2** | `internal/ai` 推理内核 | CGO 封装 + 自检命令 | `server -selftest` 打印 device / warmup / 单图耗时 |
-| **P3** | 索引流水线 | `IndexService` + `/api/index/*` | 14k 张全量 < 40 分钟，可取消、可续跑 |
-| **P4** | 检索 API | `/api/search/*` | 中文查询 top-10 人工相关度 ≥ 7/10 |
-| **P5** | 前端 | Web 搜索页 + Android 入口 | 端到端可用 |
-| **P6** | 校准与调优 | 分数阈值 + 并发参数 | 误检率可接受，GPU 利用率稳定 |
+| **P2** | `internal/ai` 推理内核 | ✅ 已完成 | 分词器与 golden 逐 token 一致；预处理对拍 cos=1.00000000 |
+| **P3** | 索引流水线 | ✅ 已完成 | `IndexService` + `/api/index/*`，可取消、可续跑、含幽灵记录清理 |
+| **P4** | 检索 API | ✅ 已完成 | `/api/search/semantic`、`/api/search/similar` |
+| **P5** | 前端 | ✅ 已完成 | Web 智能检索面板 + 文件右键「找相似图片」 |
+| **P6** | 校准与调优 | 待做 | 真实库标注样本校准阈值 |
+
+### 12.1 实现偏差记录（P2~P5）
+
+落地时有几处与上文设计不同，均有明确原因，改动前请先读：
+
+| 项 | 设计 | 实现 | 原因 |
+|---|---|---|---|
+| ORT 绑定 | 手写 CGO 封装 `OrtApi` 函数表 | `github.com/yalue/onnxruntime_go`（dlopen 动态加载） | `OrtApi` 是函数指针表，手写要精确对齐字段顺序，跨版本极易错位；该库用 dlopen，构建期不需要头文件，运行期只需 `.so`。其 API 版本为 22，要求 ORT ≥ 1.22，镜像固定 1.24.1 |
+| libjpeg 启用方式 | `cgo` 标签 | `cgo && libjpeg` 双标签，Dockerfile 显式 `-tags libjpeg` | 避免任何 cgo 构建都被迫依赖 `jpeglib.h`；缺标签时自动退回标准库解码（慢 24 倍但结果正确） |
+| HEIC（F6） | libheif 接入 | **未实现**，`.heic/.heif` 不参与索引 | 目标库 HEIC 为 0 张；libheif 绑定无法在开发机验证，宁可留空也不上线未测代码。配置项保留，后续接入不影响调用方 |
+| `/api/index/status` | AI 不可用时 503 | 200 + `available:false` + `reason` | 状态接口的职责就是解释「为什么不可用」，503 会让前端无从展示原因。`scan`/`health`/`search` 仍是 503 |
+| 以图搜图源图未索引 | 直接报错 | 现场编码并落库 | 用户常对刚上传的图「以图搜图」，此时索引任务可能还没跑到 |
+| 幽灵记录 | 检索时校验存在性 | 检索校验 + 扫描结束 `PruneAssets` | 只校验会让库里的死记录越积越多 |
+| 模型目录解析 | 配置里写死路径 | 留空 → `<data_dir>/models/<model_id>`；相对路径按「工作目录 → 数据目录」两级探测 | 本地 `make dev-server` 的 cwd 是 `server/`（模型在 `server/models`），容器里 cwd 是 `/app` 而模型挂在 `/data/models`，同一份 `config.json` 要两处都能命中。解析结果只进局部变量、不写回配置，避免容器把 `/data/...` 固化进宿主机文件 |
+| `PruneAssets` 范围 | 按 `keep` 集合全库清理 | 增加 `scope` 参数，只清理本次实际走到的挂载点 | 挂载点临时掉线时，全库清理会把整个挂载的文件记录误判为已删除 |
 
 ### P1 交付状态（已完成）
 

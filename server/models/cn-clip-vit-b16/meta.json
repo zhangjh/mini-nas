@@ -31,8 +31,13 @@
   },
   "normalize": "l2",
   "preprocess": {
-    "resize": "shortest_side",
-    "crop": "center",
+    "resize": "stretch",
+    "size": [
+      224,
+      224
+    ],
+    "resample": "bicubic",
+    "crop": "none",
     "mean": [
       0.48145466,
       0.4578275,

@@ -17,6 +17,7 @@ type Config struct {
 	JWTSecret string          `json:"jwt_secret"`
 	Dedup     DedupConfig     `json:"dedup"`
 	Thumbnail ThumbnailConfig `json:"thumbnail"`
+	AI        AIConfig        `json:"ai"`
 	HostRoot  string          `json:"-"` // 宿主机根目录在容器内的映射路径，通过环境变量 HOST_ROOT 设置
 }
 
@@ -49,6 +50,88 @@ type ThumbnailConfig struct {
 	BackfillWorkers int `json:"backfill_workers"`
 	// PruneOrphans 补齐任务结束时顺带清理不再对应源文件的缓存。
 	PruneOrphans bool `json:"prune_orphans"`
+}
+
+// AIConfig 控制语义检索与索引。
+type AIConfig struct {
+	// Enabled 为 false 时完全不加载模型，检索接口返回 503。
+	Enabled bool `json:"enabled"`
+	// ModelDir 是模型产物目录（含 meta.json / vocab.txt / 两个 onnx）。
+	// 留空表示 <data_dir>/models/<model_id>；相对路径先按工作目录、再按
+	// 数据目录解析，因此同一份配置在本地开发和容器里都能命中。
+	ModelDir string `json:"model_dir"`
+	// ModelID 是向量归属标识。换模型不删旧向量，靠它隔离，可平滑切换/回滚。
+	ModelID string `json:"model_id"`
+	// Device 支持 GPU / CPU。GPU 不可用时自动降级并打 WARN（慢 6 倍，必须可见）。
+	Device string `json:"device"`
+	// Precision 仅 GPU 生效，FP16 实测余弦 0.99999。
+	Precision string `json:"precision"`
+	// ORTLib 是 libonnxruntime.so 的绝对路径；为空时走系统动态库搜索路径。
+	ORTLib string `json:"ort_lib"`
+	// Threads 是会话内并行度。CPU 侧加线程反而更慢，默认 1。
+	Threads int `json:"threads"`
+	// BatchSize 是落库批量。
+	BatchSize int `json:"batch_size"`
+	// ThrottleMS 是每张图推理后的休眠，给 Web 请求让路。
+	ThrottleMS int `json:"throttle_ms"`
+	// PreferThumbnail 优先用缩略图索引（零信息损失，快 24 倍）。
+	PreferThumbnail bool `json:"prefer_thumbnail"`
+	// WritebackThumbnail 解原图的顺便回写缩略图缓存。
+	WritebackThumbnail bool `json:"writeback_thumbnail"`
+	// SelfTest 启动时用 golden.npz 对拍，失败则拒绝启用。
+	SelfTest bool `json:"selftest"`
+	// TextCacheSize 是查询向量 LRU 容量。
+	TextCacheSize int            `json:"text_cache_size"`
+	Search        AISearchConfig `json:"search"`
+	Extensions    []string       `json:"extensions"`
+}
+
+// AISearchConfig 是检索默认值与分数阈值。
+//
+// 图文余弦与图图余弦分布完全不同：图文匹配通常 0.20~0.35，图图相似 0.85+
+// 才算同款，所以阈值必须分开配置。
+type AISearchConfig struct {
+	DefaultLimit  int     `json:"default_limit"`
+	TextMinScore  float64 `json:"text_min_score"`
+	ImageMinScore float64 `json:"image_min_score"`
+}
+
+// DefaultAIExtensions 是参与索引的图片扩展名。
+func DefaultAIExtensions() []string {
+	return []string{".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".heif"}
+}
+
+func (a *AIConfig) applyDefaults() {
+	if a.ModelID == "" {
+		a.ModelID = "cn-clip-vit-b16"
+	}
+	if a.Device == "" {
+		a.Device = "GPU"
+	}
+	if a.Precision == "" {
+		a.Precision = "FP16"
+	}
+	if a.Threads <= 0 {
+		a.Threads = 1
+	}
+	if a.BatchSize <= 0 {
+		a.BatchSize = 64
+	}
+	if a.TextCacheSize <= 0 {
+		a.TextCacheSize = 256
+	}
+	if a.Search.DefaultLimit <= 0 {
+		a.Search.DefaultLimit = 50
+	}
+	if a.Search.TextMinScore <= 0 {
+		a.Search.TextMinScore = 0.18
+	}
+	if a.Search.ImageMinScore <= 0 {
+		a.Search.ImageMinScore = 0.75
+	}
+	if len(a.Extensions) == 0 {
+		a.Extensions = DefaultAIExtensions()
+	}
 }
 
 func (c *Config) ThumbCacheDir() string {
@@ -84,6 +167,26 @@ func Load(path string) (*Config, error) {
 			BackfillWorkers: 4,
 			PruneOrphans:    true,
 		},
+		// 语义检索默认开启：模型缺失时会在启动阶段降级为 503 并打日志，
+		// 而不是让整个服务起不来。
+		AI: AIConfig{
+			Enabled:            true,
+			ModelID:            "cn-clip-vit-b16",
+			Device:             "GPU",
+			Precision:          "FP16",
+			Threads:            1,
+			BatchSize:          64,
+			PreferThumbnail:    true,
+			WritebackThumbnail: true,
+			SelfTest:           true,
+			TextCacheSize:      256,
+			Search: AISearchConfig{
+				DefaultLimit:  50,
+				TextMinScore:  0.18,
+				ImageMinScore: 0.75,
+			},
+			Extensions: DefaultAIExtensions(),
+		},
 	}
 
 	if data, err := os.ReadFile(path); err == nil {
@@ -101,6 +204,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.Dedup.applyDefaults()
+	cfg.AI.applyDefaults()
 
 	cfg.HostRoot = os.Getenv("HOST_ROOT")
 

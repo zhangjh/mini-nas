@@ -7,8 +7,10 @@ require (
 	github.com/go-chi/chi/v5 v5.0.12
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/google/uuid v1.6.0
+	github.com/yalue/onnxruntime_go v1.24.0
 	golang.org/x/crypto v0.24.0
 	golang.org/x/image v0.0.0-20191009234506-e7c1f5e7dbb8
+	golang.org/x/text v0.16.0
 )
 
 require (

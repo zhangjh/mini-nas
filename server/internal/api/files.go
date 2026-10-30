@@ -39,6 +39,8 @@ type FileHandler struct {
 	fileSvc  *service.FileService
 	thumbSvc *service.ThumbnailService
 	hashSvc  *service.HashService
+	// indexSvc 可为 nil（AI 未启用）：文件删除/改名时同步清理语义索引。
+	indexSvc *service.IndexService
 	dedupCfg config.DedupConfig
 	hostRoot string // 宿主机根目录在容器内的映射路径，为空则直接用原始路径
 }
@@ -47,6 +49,7 @@ func NewFileHandler(
 	fileSvc *service.FileService,
 	thumbSvc *service.ThumbnailService,
 	hashSvc *service.HashService,
+	indexSvc *service.IndexService,
 	dedupCfg config.DedupConfig,
 	hostRoot string,
 ) *FileHandler {
@@ -54,6 +57,7 @@ func NewFileHandler(
 		fileSvc:  fileSvc,
 		thumbSvc: thumbSvc,
 		hashSvc:  hashSvc,
+		indexSvc: indexSvc,
 		dedupCfg: dedupCfg,
 		hostRoot: hostRoot,
 	}
@@ -317,6 +321,7 @@ func (h *FileHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	h.invalidateFingerprints(req.Path)
 	h.invalidateThumbs(req.Path)
+	h.invalidateAssetsUnder(req.Path)
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }
 
@@ -358,6 +363,25 @@ func (h *FileHandler) invalidateThumbs(virtualPaths ...string) {
 	}
 }
 
+// invalidateAssetsUnder 在删除后清理语义索引。
+//
+// 索引与文件系统没有事务：不清理的话，检索仍会命中已删除的文件，
+// 用户点开就是 404。目录删除时按前缀整棵清理。
+func (h *FileHandler) invalidateAssetsUnder(virtualPath string) {
+	if h.indexSvc == nil || virtualPath == "" {
+		return
+	}
+	h.indexSvc.ForgetUnder(virtualPath)
+}
+
+// renameAsset 让索引跟随改名/移动。
+func (h *FileHandler) renameAsset(oldPath, newPath string) {
+	if h.indexSvc == nil || oldPath == "" || newPath == "" {
+		return
+	}
+	h.indexSvc.RenamePath(oldPath, newPath)
+}
+
 func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path    string `json:"path"`
@@ -377,6 +401,7 @@ func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	}
 	h.invalidateFingerprints(req.Path)
 	h.invalidateThumbs(req.Path, newPath)
+	h.renameAsset(req.Path, newPath)
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }
 
@@ -398,7 +423,9 @@ func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
 	for _, p := range req.Paths {
 		h.invalidateFingerprints(p)
 		// Move 的 dst 恒为 dest 目录下的同名文件
-		h.invalidateThumbs(p, filepath.Join(req.Dest, filepath.Base(p)))
+		dst := filepath.Join(req.Dest, filepath.Base(p))
+		h.invalidateThumbs(p, dst)
+		h.renameAsset(p, dst)
 	}
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }

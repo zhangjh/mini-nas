@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zhangjh/mini-nas/server/internal/ai"
 	"github.com/zhangjh/mini-nas/server/internal/api"
 	"github.com/zhangjh/mini-nas/server/internal/config"
 	"github.com/zhangjh/mini-nas/server/internal/service"
@@ -42,6 +43,12 @@ func main() {
 		cfg.DataDir = *dataDir
 		cfg.UploadDir = filepath.Join(cfg.DataDir, "files")
 	}
+
+	// 必须在 -data 覆盖之后再解析，否则容器里会指向 /app/data。
+	// 结果只放在局部变量里，不写回 cfg：cfg.Save 会把绝对路径固化进
+	// 配置文件，而配置文件本身在数据目录里，容器写 /data/... 后宿主机
+	// 本地开发就会读到这条路径。
+	modelDir := resolveModelDir(cfg.AI.ModelDir, cfg.DataDir, cfg.AI.ModelID)
 
 	if err := cfg.Save(absConfigPath); err != nil {
 		log.Printf("Warning: could not save config: %v", err)
@@ -93,7 +100,64 @@ func main() {
 		cfg.Thumbnail.BackfillWorkers, cfg.Thumbnail.PruneOrphans, cfg.DataDir,
 	)
 
-	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc, userSvc, hashSvc, dedupSvc, thumbJobs)
+	// 语义检索：模型或推理运行库缺失时降级为 503，不影响其余功能启动。
+	// 这与「去重关闭」是同一种降级语义，客户端只需处理一种失败形态。
+	var (
+		aiEngine  *ai.Engine
+		indexSvc  *service.IndexService
+		searchSvc *service.SearchService
+	)
+	if cfg.AI.Enabled {
+		log.Printf("语义检索: model_dir=%s device=%s precision=%s", modelDir, cfg.AI.Device, cfg.AI.Precision)
+		engine, err := ai.New(ai.Config{
+			ModelDir:      modelDir,
+			ModelID:       cfg.AI.ModelID,
+			Device:        cfg.AI.Device,
+			Precision:     cfg.AI.Precision,
+			ORTLib:        cfg.AI.ORTLib,
+			Threads:       cfg.AI.Threads,
+			SelfTest:      cfg.AI.SelfTest,
+			TextCacheSize: cfg.AI.TextCacheSize,
+		})
+		if err != nil {
+			log.Printf("WARN 语义检索未启用: %v", err)
+		} else {
+			aiEngine = engine
+			defer engine.Close()
+
+			vecIdx := service.NewVectorIndex(engine.Dim())
+			indexSvc = service.NewIndexService(db, engine, mountSvc, fileSvc, thumbSvc, vecIdx, service.IndexOptions{
+				ModelID:            cfg.AI.ModelID,
+				Extensions:         cfg.AI.Extensions,
+				ThrottleMS:         cfg.AI.ThrottleMS,
+				BatchSize:          cfg.AI.BatchSize,
+				PreferThumbnail:    cfg.AI.PreferThumbnail,
+				WritebackThumbnail: cfg.AI.WritebackThumbnail,
+				DataDir:            cfg.DataDir,
+			})
+			searchSvc = service.NewSearchService(engine, db, fileSvc, vecIdx, service.SearchOptions{
+				DefaultLimit:  cfg.AI.Search.DefaultLimit,
+				TextMinScore:  cfg.AI.Search.TextMinScore,
+				ImageMinScore: cfg.AI.Search.ImageMinScore,
+			})
+			// 后台预加载向量索引，避免首次检索冷启动。
+			searchSvc.Warmup()
+		}
+	}
+
+	apiRouter := api.NewRouter(api.Deps{
+		Config:    cfg,
+		Files:     fileSvc,
+		Thumbs:    thumbSvc,
+		Mounts:    mountSvc,
+		Users:     userSvc,
+		Hashes:    hashSvc,
+		Dedup:     dedupSvc,
+		ThumbJobs: thumbJobs,
+		Index:     indexSvc,
+		Search:    searchSvc,
+		AI:        aiEngine,
+	})
 	staticSrv := spaFallback(staticHandler())
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +198,35 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 	log.Println("Server stopped")
+}
+
+// resolveModelDir 决定模型产物目录（含 meta.json / vocab.txt / 两个 onnx）。
+//
+// 默认是 <data_dir>/models/<model_id>：docker-compose 把 ./server/models 挂到
+// /data/models，零配置即可生效。
+//
+// 相对路径先按工作目录解析，再按数据目录解析。两个场景共用同一份 config.json：
+//   - 本地 `make dev-server` 在 server/ 下启动，模型在 server/models，第一候选命中；
+//   - 容器内工作目录是 /app，模型在 /data/models，第一候选不存在，第二候选命中。
+//
+// 两个候选都不存在时原样返回，让引擎报「模型文件缺失」并降级为 503，
+// 而不是在这里静默指向一个空目录。
+func resolveModelDir(configured, dataDir, modelID string) string {
+	if configured == "" {
+		return filepath.Join(dataDir, "models", modelID)
+	}
+	if filepath.IsAbs(configured) {
+		return configured
+	}
+	for _, c := range []string{configured, filepath.Join(dataDir, configured)} {
+		if st, err := os.Stat(c); err == nil && st.IsDir() {
+			if abs, err := filepath.Abs(c); err == nil {
+				return abs
+			}
+			return c
+		}
+	}
+	return configured
 }
 
 // excludedPaths 返回不参与去重扫描的目录（服务端自身产生的数据）。
