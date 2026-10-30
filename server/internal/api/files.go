@@ -261,7 +261,7 @@ func (h *FileHandler) Thumbnail(w http.ResponseWriter, r *http.Request) {
 
 	absPath := h.fileSvc.AbsPath(path)
 
-	thumbPath, err := h.thumbSvc.GetThumbnail(absPath)
+	thumbPath, err := h.thumbSvc.Get(absPath)
 	if err != nil || thumbPath == "" {
 		writeJSON(w, http.StatusNotFound, model.APIResponse{
 			OK: false, Error: "thumbnail not available",
@@ -310,6 +310,7 @@ func (h *FileHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.invalidateFingerprints(req.Path)
+	h.invalidateThumbs(req.Path)
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }
 
@@ -326,6 +327,28 @@ func (h *FileHandler) invalidateFingerprints(virtualPath string) {
 	}
 	if err := h.hashSvc.ForgetSkip(virtualPath); err != nil {
 		log.Printf("forget skip %s: %v", virtualPath, err)
+	}
+}
+
+// invalidateThumbs 清除一批虚拟路径对应的缩略图缓存。
+//
+// 缩略图以源文件绝对路径的哈希为键，所以要先经挂载点解析。
+// 注意这里只处理「路径本身」：目录删除时无法枚举其下的文件，残留缓存
+// 由 backfill 的 PruneOrphans 兜底清理。
+//
+// 改名/移动必须显式失效：os.Rename 会保留源文件的 mtime，若目标路径上
+// 已有更晚生成的缓存，仅靠 mtime 校验会误判为「新鲜」，从而返回旧图。
+func (h *FileHandler) invalidateThumbs(virtualPaths ...string) {
+	if h.thumbSvc == nil {
+		return
+	}
+	for _, p := range virtualPaths {
+		if p == "" {
+			continue
+		}
+		if abs := h.fileSvc.AbsPath(p); abs != "" {
+			h.thumbSvc.Invalidate(abs)
+		}
 	}
 }
 
@@ -349,6 +372,7 @@ func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.invalidateFingerprints(req.Path)
+	h.invalidateThumbs(req.Path, newPath)
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }
 
@@ -371,6 +395,8 @@ func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, p := range req.Paths {
 		h.invalidateFingerprints(p)
+		// Move 的 dst 恒为 dest 目录下的同名文件
+		h.invalidateThumbs(p, filepath.Join(req.Dest, filepath.Base(p)))
 	}
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }
@@ -391,6 +417,11 @@ func (h *FileHandler) Copy(w http.ResponseWriter, r *http.Request) {
 			OK: false, Error: err.Error(),
 		})
 		return
+	}
+	// 复制会在目标目录生成新文件，若该路径此前有缓存需一并失效
+	// （复制实现可能保留源 mtime，仅靠 mtime 校验不足以判定新鲜）。
+	for _, p := range req.Paths {
+		h.invalidateThumbs(filepath.Join(req.Dest, filepath.Base(p)))
 	}
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }

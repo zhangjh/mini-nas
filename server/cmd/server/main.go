@@ -58,6 +58,9 @@ func main() {
 
 	fileSvc := service.NewFileService(mountSvc, cfg.HostRoot)
 	thumbSvc := service.NewThumbnailService(cfg.ThumbCacheDir())
+	thumbSvc.MaxSize = cfg.Thumbnail.MaxSize
+	thumbSvc.Quality = cfg.Thumbnail.JPEGQuality
+	thumbSvc.ValidateMtime = cfg.Thumbnail.ValidateMtime
 
 	db, err := store.Open(cfg.DBPath())
 	if err != nil {
@@ -85,7 +88,12 @@ func main() {
 	}
 	dedupSvc := service.NewDedupService(db, mountSvc, hashSvc, dedupOpts, cfg.TrashDir())
 
-	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc, userSvc, hashSvc, dedupSvc)
+	thumbJobs := service.NewThumbJobService(
+		db, mountSvc, thumbSvc, fileSvc,
+		cfg.Thumbnail.BackfillWorkers, cfg.Thumbnail.PruneOrphans,
+	)
+
+	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc, userSvc, hashSvc, dedupSvc, thumbJobs)
 	staticSrv := spaFallback(staticHandler())
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

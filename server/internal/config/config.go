@@ -11,12 +11,13 @@ import (
 )
 
 type Config struct {
-	Port      int         `json:"port"`
-	DataDir   string      `json:"data_dir"`
-	UploadDir string      `json:"upload_dir"`
-	JWTSecret string      `json:"jwt_secret"`
-	Dedup     DedupConfig `json:"dedup"`
-	HostRoot  string      `json:"-"` // 宿主机根目录在容器内的映射路径，通过环境变量 HOST_ROOT 设置
+	Port      int             `json:"port"`
+	DataDir   string          `json:"data_dir"`
+	UploadDir string          `json:"upload_dir"`
+	JWTSecret string          `json:"jwt_secret"`
+	Dedup     DedupConfig     `json:"dedup"`
+	Thumbnail ThumbnailConfig `json:"thumbnail"`
+	HostRoot  string          `json:"-"` // 宿主机根目录在容器内的映射路径，通过环境变量 HOST_ROOT 设置
 }
 
 // DedupConfig 控制内容去重行为。
@@ -33,6 +34,21 @@ type DedupConfig struct {
 	MaxScanFiles int `json:"max_scan_files"`
 	// HashWorkers 扫描阶段并发哈希协程数。
 	HashWorkers int `json:"hash_workers"`
+}
+
+// ThumbnailConfig 控制缩略图生成与缓存。
+type ThumbnailConfig struct {
+	// MaxSize 缩略图长边上限。语义索引假定短边 >= 224，不要随意调小。
+	MaxSize int `json:"max_size"`
+	// JPEGQuality 缩略图编码质量。
+	JPEGQuality int `json:"jpeg_quality"`
+	// ValidateMtime 为 true 时，缓存比源文件旧即重新生成。
+	// 关闭会让「同路径换内容」返回旧图，除非另有失效逻辑兜底。
+	ValidateMtime bool `json:"validate_mtime"`
+	// BackfillWorkers 批量补齐的并发数。实测 4 线程已接近 IO 瓶颈。
+	BackfillWorkers int `json:"backfill_workers"`
+	// PruneOrphans 补齐任务结束时顺带清理不再对应源文件的缓存。
+	PruneOrphans bool `json:"prune_orphans"`
 }
 
 func (c *Config) ThumbCacheDir() string {
@@ -58,6 +74,15 @@ func Load(path string) (*Config, error) {
 		Dedup: DedupConfig{
 			Enabled:             true,
 			SkipUploadDuplicate: true,
+		},
+		// 同理：ValidateMtime 的零值是 false，但正确行为是 true。
+		// 先在反序列化前置位，配置文件显式写 false 才会被覆盖。
+		Thumbnail: ThumbnailConfig{
+			MaxSize:         320,
+			JPEGQuality:     80,
+			ValidateMtime:   true,
+			BackfillWorkers: 4,
+			PruneOrphans:    true,
 		},
 	}
 

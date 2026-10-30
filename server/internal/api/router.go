@@ -17,6 +17,7 @@ func NewRouter(
 	userSvc *service.UserService,
 	hashSvc *service.HashService,
 	dedupSvc *service.DedupService,
+	thumbJobs *service.ThumbJobService,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -36,6 +37,7 @@ func NewRouter(
 	fileH := NewFileHandler(fileSvc, thumbSvc, hashSvc, cfg.Dedup, cfg.HostRoot)
 	mountH := NewMountHandler(mountSvc)
 	dedupH := NewDedupHandler(dedupSvc, hashSvc, cfg.Dedup.Enabled)
+	thumbH := NewThumbHandler(thumbJobs)
 
 	r.Get("/api/auth/status", authH.Status)
 	r.Post("/api/auth/login", authH.Login)
@@ -75,6 +77,11 @@ func NewRouter(
 		r.Post("/dedup/resolve", dedupH.Resolve)
 		r.Get("/dedup/stats", dedupH.Stats)
 		r.Get("/dedup/skips", dedupH.Skips)
+
+		// 缩略图存量补齐（缩略图本身由 GET /thumb 按需生成）
+		r.Post("/thumb/backfill", thumbH.Backfill)
+		r.Post("/thumb/cancel", thumbH.Cancel)
+		r.Get("/thumb/status", thumbH.Status)
 	})
 
 	return r
