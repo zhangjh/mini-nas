@@ -21,8 +21,12 @@ services:
     # iGPU 直通：没有这两个配置，OpenVINO 只能跑 CPU（索引慢约 6 倍）。
     devices:
       - /dev/dri:/dev/dri
+    # /dev/dri/renderD128 属主是 root:render(660)，容器内进程必须带上这个 GID。
+    # 只能传数字：镜像里没有 render 组（Debian 默认不建），写组名会让容器
+    # 直接起不来（"Unable to find group render"）。
+    # 取值用 stat -c %g /dev/dri/renderD128 查，本机是 110。
     group_add:
-      - render
+      - "${RENDER_GID:-110}"
     restart: unless-stopped
 
   web:
