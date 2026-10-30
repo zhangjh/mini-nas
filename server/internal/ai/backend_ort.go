@@ -101,15 +101,41 @@ func newBackend(cfg Config, meta Meta) (backend, error) {
 
 func initORT(libPath string) {
 	ortOnce.Do(func() {
-		if libPath != "" {
-			if _, err := os.Stat(libPath); err != nil {
-				ortErr = fmt.Errorf("onnxruntime 库不存在: %s", libPath)
-				return
-			}
-			ort.SetSharedLibraryPath(libPath)
+		if p := resolveORTLib(libPath); p != "" {
+			ort.SetSharedLibraryPath(p)
 		}
 		ortErr = ort.InitializeEnvironment()
 	})
+}
+
+// resolveORTLib 决定 libonnxruntime 的实际路径。
+//
+// 绑定库不指定路径时按 "onnxruntime.so" 找，但发行包几乎只提供版本化的
+// libonnxruntime.so.1.24.1（镜像里从 wheel 抽出来的就是这种），
+// 直接 dlopen 会报 "cannot open shared object file"。
+//
+// 优先级：显式配置 > LD_LIBRARY_PATH 下的常见文件名 > 版本化文件名。
+// 返回空串表示交给绑定库用默认逻辑（系统 ldconfig 路径）。
+func resolveORTLib(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("LD_LIBRARY_PATH")) {
+		if dir == "" {
+			continue
+		}
+		for _, name := range []string{"onnxruntime.so", "libonnxruntime.so"} {
+			p := filepath.Join(dir, name)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+		// Glob 返回结果已排序；同一目录只会有一个大版本，取首个即可。
+		if matches, _ := filepath.Glob(filepath.Join(dir, "libonnxruntime.so.*")); len(matches) > 0 {
+			return matches[0]
+		}
+	}
+	return ""
 }
 
 func gpuAvailable() bool {
