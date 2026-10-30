@@ -81,13 +81,17 @@ RUN apt-get -o Acquire::ForceIPv4=true update \
       ca-certificates tzdata libjpeg62-turbo \
  && rm -rf /var/lib/apt/lists/*
 
-# iGPU 用户态驱动。装不上就退化为 CPU 推理（索引慢约 6 倍），
-# 但不让整个镜像构建失败——/api/index/health 会暴露 device，运维能立刻看到降级。
+# iGPU 用户态驱动。OpenVINO 的 GPU 插件优先走 Level Zero，没有就走 OpenCL，
+# 所以只装 OpenCL ICD 即可（Debian 12 的 intel-opencl-icd 提供
+# /etc/OpenCL/vendors/intel.icd 与 intel-opencl/libigdrcl.so）。
+# 不要照抄 Ubuntu 的包名：libze-intel-gpu1 / intel-level-zero-gpu 在 Debian 12
+# 里不存在，apt 会一次性报「Unable to locate package」并把整条命令判失败。
+#
+# 装不上就退化为 CPU 推理（索引慢约 6 倍），但不让镜像构建失败——
+# /api/index/health 会暴露 device，运维能立刻看到降级。
 RUN apt-get -o Acquire::ForceIPv4=true update \
  && ( apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
-        intel-opencl-icd libze-intel-gpu1 \
-      || apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
-        intel-opencl-icd intel-level-zero-gpu libze1 \
+        intel-opencl-icd \
       || echo "WARN: iGPU 用户态驱动未安装，语义索引将使用 CPU" ) \
  && rm -rf /var/lib/apt/lists/*
 
