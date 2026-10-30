@@ -26,7 +26,7 @@ PY="${PY:-python3}"
 # 文件名与期望大小下限（字节）。用于判断已有文件是否完整，避免半截文件被复用。
 FILES="config.json:2000 preprocessor_config.json:200 vocab.txt:100000 pytorch_model.bin:700000000"
 
-echo "== 1/3 下载 PyTorch 权重 =="
+echo "== 1/4 下载 PyTorch 权重 =="
 mkdir -p "$SRC_DIR"
 for spec in $FILES; do
   f="${spec%%:*}"
@@ -45,7 +45,7 @@ for spec in $FILES; do
   echo "  got $f ($(wc -c < "$SRC_DIR/$f") bytes)"
 done
 
-echo "== 2/3 检查依赖 =="
+echo "== 2/4 检查依赖 =="
 if ! "$PY" -c "import torch, transformers, onnx, onnxruntime" 2>/dev/null; then
   echo "缺少依赖，请先执行：" >&2
   echo "  pip install torch --index-url https://download.pytorch.org/whl/cpu" >&2
@@ -54,6 +54,10 @@ if ! "$PY" -c "import torch, transformers, onnx, onnxruntime" 2>/dev/null; then
 fi
 "$PY" -c "import transformers; print('  transformers', transformers.__version__)"
 
-echo "== 3/3 导出 + 四段校验 =="
+echo "== 3/4 导出 + 四段校验 =="
 echo "  out: $OUT_DIR"
-exec "$PY" "$HERE/export_clip_onnx.py" --model "$SRC_DIR" --out "$OUT_DIR" "$@"
+"$PY" "$HERE/export_clip_onnx.py" --model "$SRC_DIR" --out "$OUT_DIR" "$@"
+
+echo "== 4/4 生成预处理黄金样本 =="
+exec "$PY" "$HERE/make_preproc_golden.py" --model "$SRC_DIR" \
+  --out "$OUT_DIR/preproc_golden.npz"

@@ -53,6 +53,8 @@ sg render -c "/tmp/bench/bin/python scripts/bench/bench_gpu_sweep.py"
 | 脚本 | 用途 | 关键结论 |
 |---|---|---|
 | `export_clip_onnx.py`（上级目录） | 导出静态 shape ONNX + 四段校验 | 视觉 1.00000000 / 文本 0.99999988 / GPU FP16 0.99999 |
+| `make_preproc_golden.py`（上级目录） | 生成预处理黄金样本 | 641×427 合成图 + 官方 processor 期望张量，手算复核 diff=0 |
+| `ab_preproc.py` | **判定正确预处理：拉伸 vs 中心裁剪** | 官方拉伸 margin +0.0725 > 中心裁剪 +0.0669，两者向量余弦 0.974 |
 | `bench_exported.py` | 导出产物的 CPU/GPU 多配置性能 + 保真度 | GPU FP16 121 ms，CPU 747 ms，均 cos > 0.99999 |
 | `diag_ovgpu.py` | **复现动态 shape 的 GPU 全零输出** | 静态/动态对照，证明 bug 来源 |
 | `diag_ort_ov_static.py` | ORT-OV EP 静态 vs 动态 shape | 静态下 GPU 121 ms / cos 0.99999511，正常 |

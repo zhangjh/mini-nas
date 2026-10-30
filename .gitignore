@@ -43,7 +43,8 @@ server/bin/
 # 工具/项目数据目录
 .workbuddy-ai/
 
-# 模型产物不入库：两份 ONNX 合计 718MB，GitHub 免费 LFS 只有 1GB 存储 / 1GB 月流量。
+# 模型权重不入库：两份 ONNX 合计 718MB，GitHub 免费 LFS 只有 1GB 存储 / 1GB 月流量。
 # 复现方式：scripts/setup_model.sh（下载权重 + 导出 + 四段校验，约 4 分钟）
-# 接口契约见 docs/design-semantic-index.md §11.3
-server/models/
+# 但小体积的测试夹具要入库（meta/vocab/golden/preproc_golden，合计约 830KB），
+# 否则新 clone 下来跑不了 Go 侧对拍测试。
+server/models/**/*.onnx

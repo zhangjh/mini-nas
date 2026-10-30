@@ -17,6 +17,7 @@
 | 推理加速 | **iGPU 可用**，ORT + OpenVINO EP，GPU FP16 比 CPU 快 **6.0 倍**（722ms → 121ms） |
 | 推理后端 | **ONNX Runtime C API + OpenVINO EP**（一套运行时同时覆盖 CPU/GPU） |
 | **模型 shape** | **必须静态**。动态 batch 会让 OpenVINO EP 在 GPU 上静默输出错向量（见 §2.5） |
+| **预处理** | **直接拉伸到 224×224**，不是「短边缩放 + 中心裁剪」。与 OpenAI CLIP 惯例相反，实测官方拉伸更优（见 §7.2） |
 | 索引输入 | **缩略图优先**，缺失时解原图并回写缩略图 |
 | 缩略图 | 现有实现有 4 个缺陷（无失效/无 mtime 校验/键碰撞/解码慢），**已改造完成**；批量补齐 9,472 张约 2 分钟 |
 | 图像解码 | **libjpeg-turbo（DCT 降采样）**。纯 Go 全解码慢 24 倍，不可接受 |
@@ -30,6 +31,24 @@
 > 那次基准只测了速度、没校验输出，而当时的动态 shape 模型在 GPU 上返回的是
 > 全零向量。修正后结论仍然成立（iGPU 确实能用），但**后端从"原生 OpenVINO
 > C API"改为"ORT C API + OpenVINO EP"**，且模型必须导出静态 shape。详见 §2.5。
+
+### 从哪开始（给接手的实现者）
+
+已完成：P0 去重、P0.1 挂载点修复、P1 模型导出、P2.5 缩略图改造。
+**下一步是 P2：`internal/ai` 推理内核**，它是后面 P3/P4 的前置。
+
+P2 的四个硬约束，写代码前先记住：
+
+1. **模型静态 shape**，`[1,3,224,224]` 和 `[1,64]`，不要"顺手支持动态 batch"（§2.5）
+2. **预处理是拉伸**，不是中心裁剪（§7.2）
+3. **文本池化用 CLS token**，不是 `pooler_output`（CN-CLIP 的 pooler 是 None）
+4. **`OrtApi` 是函数指针表**，CGO 里必须用 C 静态内联函数转发，不能直接跨语言取成员
+
+验收方式：跑 `preproc_golden.npz`（预处理级）和 `golden.npz`（模型级）两个夹具，
+两者都 > 0.999 才算通过。夹具已入库，**不需要 Python 环境**。
+
+模型权重不在仓库里，首次开发先跑一次 `scripts/setup_model.sh`；
+目标机上已经有一份，可以直接从 `/mnt/nas/dev/mini-nas/server/models/` 复制。
 
 ---
 
@@ -505,17 +524,41 @@ GET  /api/thumb/status     → { total, done, missing, orphan, running }
 
 ```
 输入原图 / 缩略图（任意尺寸，RGB）
-  → 短边等比缩放到 224（BICUBIC）
-  → 中心裁剪 224×224
+  → 直接缩放到 224×224（BICUBIC，宽高比会失真）
   → 像素值 /255
   → 逐通道减均值 [0.48145466, 0.4578275, 0.40821073]
   → 逐通道除标准差 [0.26862954, 0.26130258, 0.27577711]
   → 转 CHW，float32，连续内存
 ```
 
-**注意**：是「短边缩放 + 中心裁剪」，不是直接拉伸到 224×224。拉伸会破坏宽高比，明显劣化检索质量。
+**注意：是直接拉伸，不是「短边缩放 + 中心裁剪」。** 这一点与 OpenAI CLIP 的惯例相反，
+容易想当然写错，所以单独说明。
 
-缩略图场景下的具体路径：320×240 缩略图 → 短边 240 缩到 224 → 得 298×224 → 中心裁剪 224×224（横向裁掉约 25%）。可接受，因为缩略图本身是 `Fit` 等比缩放的，主体信息在中心。
+依据是随权重发布的 `preprocessor_config.json`：
+
+```json
+{ "do_center_crop": false, "do_resize": true, "size": {"height": 224, "width": 224},
+  "resample": 3, "image_mean": [...], "image_std": [...] }
+```
+
+`do_center_crop: false` + `size` 直接给 224×224，意味着 `resize` 到 224×224 后不裁剪 ——
+也就是拉伸。`resample: 3` 是 BICUBIC。
+
+**实测 A/B**（`scripts/bench/ab_preproc.py`，用官方仓库自带的 `festival.jpg`，
+3 条贴合画面的中文描述 + 3 条明显无关的，看「贴合 - 无关」的间隔）：
+
+| 预处理 | 贴合均值 | 无关均值 | margin |
+|---|---|---|---|
+| **官方拉伸** | 0.3539 | 0.2814 | **+0.0725** |
+| 短边缩放 + 中心裁剪 | 0.3381 | 0.2712 | +0.0669 |
+
+两种方案的图像向量余弦 0.974 —— 差异不算灾难，但官方拉伸稳定占优，且与配置文件一致。
+所以按官方来。若后续 P6 校准阶段发现宽高比失真确实影响某些类别的检索，
+可以再拿真实查询做人工评测推翻这个结论，但**不要凭直觉改**。
+
+**缩略图路径无需特殊处理**：现有缩略图是 `Fit` 等比缩放的，320×240 的缩略图
+和它的 4000×3000 原图宽高比一致，拉伸到 224×224 得到同样的几何结果（只是重采样
+起点分辨率不同）。所以索引缩略图和索引原图在几何上等价，这正是 §6.7 敢用缩略图的前提。
 
 ### 7.3 并发模型
 
@@ -788,25 +831,30 @@ sudo usermod -aG render $USER     # 生效需重新登录
 ls /dev/dri/                       # 应有 card1 与 renderD128
 ```
 
-### 11.3 模型产物（不入库，脚本复现）
+### 11.3 模型产物
 
 产物目录 `server/models/cn-clip-vit-b16/`：
 
-```
-image_encoder.onnx     328.9 MB   静态 1x3x224x224 -> 1x512
-text_encoder.onnx      389.5 MB   静态 1x64 -> 1x512
-vocab.txt              107 KB     21130 tokens，行号即 token id
-meta.json              800 B      维度/输入名/归一化参数/静态 shape 声明
-golden.npz             554 KB     固定输入 + PyTorch 参考输出，Go 侧对拍用
-verify.json            1.3 KB     导出校验报告
-```
+| 文件 | 大小 | 入库 | 说明 |
+|---|---|---|---|
+| `image_encoder.onnx` | 328.9 MB | ❌ | 静态 1×3×224×224 → 1×512 |
+| `text_encoder.onnx` | 389.5 MB | ❌ | 静态 1×64 → 1×512 |
+| `vocab.txt` | 107 KB | ✅ | 21130 tokens，行号即 token id |
+| `meta.json` | 800 B | ✅ | 维度/输入名/归一化参数/静态 shape 声明 |
+| `golden.npz` | 554 KB | ✅ | 固定输入 + PyTorch 参考输出（模型级对拍） |
+| `preproc_golden.npz` | 168 KB | ✅ | 合成源图 + 期望张量（预处理级对拍） |
+| `verify.json` | 1.3 KB | ✅ | 导出校验报告 |
 
-**不提交到仓库**，`server/models/` 已在 `.gitignore` 里。
+**只把 ONNX 权重排除在版本控制外**（`.gitignore` 规则 `server/models/**/*.onnx`），
+其余约 830 KB 的夹具照常入库。
 
 理由：两份 ONNX 合计 718 MB。GitHub 免费 LFS 只有 1 GB 存储 + 1 GB/月流量，
 占 72% 存储，且每次全新 clone 就烧掉约 718 MB 月流量；走 Release 附件又需要
 人工维护。而导出过程完全确定（固定 seed、固定预处理、固定 opset），
 用一条命令就能复现，没有必须入库的理由。
+
+但**夹具必须入库**，否则新 clone 下来跑不了 Go 侧对拍测试，`golden.npz`
+存在的意义（让 Go 不依赖 Python 就能自证正确）就没了。
 
 **复现**（约 4 分钟，其中下载权重约 100 秒）：
 
@@ -815,9 +863,9 @@ scripts/setup_model.sh
 # 产物落到 server/models/cn-clip-vit-b16/
 ```
 
-脚本做三件事：从 ModelScope 拉 PyTorch 权重 → 导出静态 shape ONNX → 跑四段校验。
-可用环境变量覆盖：`SRC_DIR`（权重缓存）、`OUT_DIR`（产物目录）、`PY`（解释器）、
-`MODEL_ID`（换模型）。
+脚本做四件事：从 ModelScope 拉 PyTorch 权重 → 导出静态 shape ONNX → 跑四段校验
+→ 生成预处理黄金样本。可用环境变量覆盖：`SRC_DIR`（权重缓存）、
+`OUT_DIR`（产物目录）、`PY`（解释器）、`MODEL_ID`（换模型）。
 
 **导出是逐字节可复现的**（固定 seed + 固定 opset + `do_constant_folding`）。实测两次
 独立导出 md5 完全一致，所以「不入库」不会带来版本漂移风险：
@@ -842,10 +890,34 @@ f642a1682a637cffd0d57e445b820b72  golden.npz
 | 文本输入 | `input_ids` + `attention_mask`，int64，`[1, 64]` |
 | 文本输出 | `text_embeds`，float32，`[1, 512]`，**未归一化** |
 | 归一化 | L2 在 Go 侧做，模型输出保持原始尺度 |
-| 预处理 | 短边缩放到 224（BICUBIC）→ 中心裁剪 224×224 → /255 → 减均值/除标准差 |
+| 预处理 | **直接拉伸到 224×224（BICUBIC）** → /255 → 减均值/除标准差 → CHW |
 | mean | `[0.48145466, 0.4578275, 0.40821073]` |
 | std | `[0.26862954, 0.26130258, 0.27577711]` |
 | 文本长度 | 固定 64，`padding="max_length"`，超长截断 |
+
+> 预处理是**拉伸**不是裁剪，理由与实测见 §7.2。这一条最容易写错。
+
+**两个对拍夹具的用法**（Go 侧 `-selftest` 与单测都应覆盖）：
+
+```go
+// 1) 预处理级：验证 resize/归一化/CHW 排布对不对
+pf := loadNPZ("server/models/cn-clip-vit-b16/preproc_golden.npz")
+src, _ := png.Decode(bytes.NewReader(pf.SourcePNG))       // 641x427 合成图
+got := preprocess(src)                                     // 你的实现
+require(cosine(got, pf.Expected) > 0.999)                  // 插值实现不同，允许微小差异
+
+// 2) 模型级：验证推理链路整体对不对
+gf := loadNPZ("server/models/cn-clip-vit-b16/golden.npz")
+out := imageEncoder(gf.PixelValues)
+require(cosine(out, gf.ImageEmbeds) > 0.999)               // 应与 CPU 参考几乎完全一致
+```
+
+两级夹具的分工：**预处理级定位问题，模型级判定通过**。只跑模型级的话，
+预处理错了只会看到余弦偏低，不知道该改哪儿；只跑预处理级的话，
+ORT 绑定错了（比如输入名写错、shape 传错）反而发现不了。
+
+`preproc_golden.npz` 里的期望张量由官方 `AutoImageProcessor` 生成，
+并用配置文件声明的参数手算复核过（`max|diff| = 0`），可以放心当基准。
 
 **权重来源**（HF 在目标机不可达，hf-mirror 大文件会卡）：
 
@@ -894,17 +966,21 @@ go build -tags cgo ./cmd/server             # 需 gcc + onnxruntime，仅 Linux
 [PASS] GPU FP16 text:  cos=0.99999702
 ```
 
-`golden.npz` 里有固定输入 + PyTorch 参考输出，Go 侧做完预处理和推理后
-可以直接对拍，**不需要 Python 环境就能验证自己算得对不对**：
+`golden.npz`（模型级）与 `preproc_golden.npz`（预处理级）已入库，
+Go 侧做完预处理和推理后可以直接对拍，**不需要 Python 环境**：
 
 ```go
-// 伪代码：P2 自检用
-fx := loadNPZ("golden.npz")
-got := encoder.Image(fx.PixelValues)          // 你的实现
-if cos(got, fx.ImageEmbeds) < 0.999 { fail() } // 直接判定
+// 预处理级：定位问题
+pf := loadNPZ("server/models/cn-clip-vit-b16/preproc_golden.npz")
+src, _ := png.Decode(bytes.NewReader(pf.SourcePNG))
+require(cosine(preprocess(src), pf.Expected) > 0.999)
+
+// 模型级：判定通过
+gf := loadNPZ("server/models/cn-clip-vit-b16/golden.npz")
+require(cosine(encoder.Image(gf.PixelValues), gf.ImageEmbeds) > 0.999)
 ```
 
-### P2.5 拆分（缩略图，必须先于索引）
+### P2.5 拆分（缩略图）—— ✅ 已完成
 
 依赖 P2 的 `decode_cgo.go`（libjpeg-turbo + libheif），不额外引入依赖。
 
@@ -925,15 +1001,18 @@ if cos(got, fx.ImageEmbeds) < 0.999 { fail() } // 直接判定
    `SessionOptionsAppendExecutionProvider_OpenVINO`（`device_type=GPU` + `precision=FP16`）/
    `CreateSession` / `CreateTensorWithDataAsOrtValue` / `Run`。
    注意 `OrtApi` 是函数指针表，CGO 里要用 `static` 内联包装函数转发，不能直接跨语言取结构体成员
-2. `internal/ai/encoder.go` — 图像预处理（短边缩放 + 中心裁剪 + 归一化 + CHW）与后处理（L2 归一化）
+2. `internal/ai/encoder.go` — 图像预处理（**直接拉伸到 224×224** + 归一化 + CHW）与后处理（L2 归一化）
 3. `internal/ai/decode_cgo.go` — libjpeg-turbo（`scale_denom`）+ libheif
 4. `internal/ai/stub.go` — `!cgo` 空实现，返回 `ErrUnavailable`
-5. `internal/ai/selftest.go` — 启动自检与预热（**含 golden.npz 对拍**）
+5. `internal/ai/selftest.go` — 启动自检与预热（**含两级夹具对拍**）
 6. **`internal/ai/tokenizer.go` — BERT WordPiece 分词器（Go 实现）**
 
 > **静态 shape 是硬约束。** 会话创建后输入维度固定为 `1x3x224x224` 和 `1x64`。
 > 任何"顺手支持一下动态 batch"的改动都会把 GPU 输出打坏（§2.5），
 > 且不会报错。批处理要在 Go 侧循环调用，不要改模型。
+
+> **预处理是拉伸不是裁剪。** §7.2 有实测依据。实现完先用 `preproc_golden.npz`
+> 单独验证这一步，再去接 ORT —— 否则预处理和推理混在一起，出问题分不清是谁的错。
 
 > **第 6 项容易被低估。** 导出脚本只产出 `vocab.txt`（一行一个 token，行号即 id），
 > Go 侧需要自己实现：BasicTokenizer（含中文按字切分、小写化、标点切分）+ WordPiece
@@ -943,6 +1022,35 @@ if cos(got, fx.ImageEmbeds) < 0.999 { fail() } // 直接判定
 > **验收**：同一批中文 query，Go 输出的 `input_ids` 与 Python
 > `ChineseCLIPProcessor` 完全一致（逐 token 比对）。`golden.npz` 里的
 > `text_input_ids` / `sem_input_ids` 可直接当测试向量。
+>
+> 注意 tokenizer 的输入是**已 pad 到 64** 的 `[1,64]`，pad 位填 `[PAD]`(id=0)、
+> `attention_mask` 填 0。中文按字切分意味着「一只猫」→ 3 个 token 而非 1 个，
+> 别按空格切。
+
+**分词测试向量**（实测，直接当单测期望值）：
+
+```
+特殊 token: [PAD]=0  [UNK]=100  [CLS]=101  [SEP]=102  [MASK]=103
+
+"一只猫坐在窗台上"  (10 tokens)
+  ids    = [101, 671, 1372, 4344, 1777, 1762, 4970, 1378, 677, 102]
+  tokens = [[CLS], 一, 只, 猫, 坐, 在, 窗, 台, 上, [SEP]]
+
+"海边日落"  (6 tokens)
+  ids    = [101, 3862, 6804, 3189, 5862, 102]
+  tokens = [[CLS], 海, 边, 日, 落, [SEP]]
+
+"红色汽车"  (6 tokens)
+  ids    = [101, 5273, 5682, 3749, 6756, 102]
+  tokens = [[CLS], 红, 色, 汽, 车, [SEP]]
+
+"city skyline at night"  (7 tokens，注意 WordPiece 会把 skyline 拆开)
+  ids    = [101, 8869, 10122, 8762, 8243, 10036, 102]
+  tokens = [[CLS], city, sky, ##line, at, night, [SEP]]
+```
+
+最后一条专门用来验 WordPiece 贪心最长匹配：`skyline` 要拆成 `sky` + `##line`
+而不是落进 `[UNK]`。只测纯中文的话这个 bug 发现不了。
 
 ### P3 拆分
 

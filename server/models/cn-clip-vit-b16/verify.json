@@ -1,0 +1,61 @@
+{
+  "threshold": 0.999,
+  "encoders": {
+    "image": {
+      "shape": [
+        1,
+        512
+      ],
+      "cos_mean": 1.0,
+      "cos_min": 1.0,
+      "deterministic": true,
+      "pass": true
+    },
+    "text": {
+      "shape": [
+        3,
+        512
+      ],
+      "cos_mean": 1.0,
+      "cos_min": 0.99999988,
+      "deterministic": true,
+      "pass": true
+    }
+  },
+  "semantics": {
+    "pairs": [
+      {
+        "anchor": "\u4e00\u53ea\u732b\u5750\u5728\u7a97\u53f0\u4e0a",
+        "near": "\u4e00\u53ea\u5c0f\u732b\u8db4\u5728\u7a97\u53f0\u4e0a",
+        "far": "\u4e00\u8f86\u7ea2\u8272\u6c7d\u8f66\u505c\u5728\u8def\u8fb9",
+        "sim_near": 0.917434,
+        "sim_far": 0.5508,
+        "pass": true
+      },
+      {
+        "anchor": "\u6d77\u8fb9\u65e5\u843d",
+        "near": "\u9ec4\u660f\u65f6\u5206\u7684\u6d77\u6ee9\u843d\u65e5",
+        "far": "\u529e\u516c\u5ba4\u91cc\u7684\u6253\u5370\u673a",
+        "sim_near": 0.962912,
+        "sim_far": 0.634312,
+        "pass": true
+      }
+    ],
+    "pass": true
+  },
+  "gpu": {
+    "image": {
+      "cos_min": 0.99999517,
+      "absmax": 8.671875,
+      "pass": true
+    },
+    "text": {
+      "cos_min": 0.99999702,
+      "absmax": 9.953125,
+      "pass": true
+    },
+    "pass": true,
+    "available": true
+  },
+  "pass": true
+}

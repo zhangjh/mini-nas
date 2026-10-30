@@ -1,0 +1,47 @@
+{
+  "model_id": "chinese-clip-vit-base-patch16",
+  "embed_dim": 512,
+  "image_size": 224,
+  "seq_len": 64,
+  "vocab_size": 21130,
+  "image_encoder": "image_encoder.onnx",
+  "text_encoder": "text_encoder.onnx",
+  "image_input": "pixel_values",
+  "image_output": "image_embeds",
+  "text_inputs": [
+    "input_ids",
+    "attention_mask"
+  ],
+  "text_output": "text_embeds",
+  "static_shapes": {
+    "pixel_values": [
+      1,
+      3,
+      224,
+      224
+    ],
+    "input_ids": [
+      1,
+      64
+    ],
+    "attention_mask": [
+      1,
+      64
+    ]
+  },
+  "normalize": "l2",
+  "preprocess": {
+    "resize": "shortest_side",
+    "crop": "center",
+    "mean": [
+      0.48145466,
+      0.4578275,
+      0.40821073
+    ],
+    "std": [
+      0.26862954,
+      0.26130258,
+      0.27577711
+    ]
+  }
+}
