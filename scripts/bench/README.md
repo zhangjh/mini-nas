@@ -13,30 +13,55 @@ sudo usermod -aG render $USER     # 需重新登录生效
 # Python 环境
 python3 -m venv /tmp/bench
 /tmp/bench/bin/pip install onnxruntime-openvino numpy pillow pillow-heif
+# 只做原生 OV 对照时才需要：
+/tmp/bench/bin/pip install openvino
 
-# 模型（CN-CLIP ViT-B/16 的 ONNX 视觉塔）
-mkdir -p /tmp/bench/m && cp image_encoder.onnx /tmp/bench/m/vitb16.onnx
+# 模型权重（HF 不可达，走 ModelScope）
+ID=AI-ModelScope/chinese-clip-vit-base-patch16
+mkdir -p /tmp/bench/cnclip-b16 && cd /tmp/bench/cnclip-b16
+for f in config.json preprocessor_config.json vocab.txt pytorch_model.bin; do
+  curl -L "https://www.modelscope.cn/api/v1/models/$ID/repo?Revision=master&FilePath=$f" -o "$f"
+done
+# 导出（约 4 分钟，含四段校验）
+sg render -c "/tmp/bench/bin/python scripts/export_clip_onnx.py \
+  --model /tmp/bench/cnclip-b16 --out /tmp/bench/out/cn-clip-vit-b16"
 ```
 
-> `huggingface.co` 在目标机不可达，导出模型时用
-> `HF_ENDPOINT=https://hf-mirror.com`。该镜像可能很慢，必要时在本地导出后传输。
+## 两个必须知道的陷阱
 
-## 关键陷阱
+### 1. GPU 测试必须经 `sg render` 执行
 
-**GPU 测试必须经 `sg render` 执行**，否则 OpenVINO 报
-`Device GPU is not available` 并**静默回退 CPU**，表现为 722 ms 而不是 111 ms，
-极易误判为"iGPU 不可用"。
+否则 OpenVINO 报 `Device GPU is not available` 并**静默回退 CPU**，
+表现为 722 ms 而不是 121 ms，极易误判为"iGPU 不可用"。
 
 ```bash
 sg render -c "/tmp/bench/bin/python scripts/bench/bench_gpu_sweep.py"
 ```
 
+### 2. 只测速度不测数值的基准等于没测
+
+**这是本预研踩过的最大的坑。** 早期用动态 batch 的 ONNX 测 GPU，得到
+「111 ms/img，快 6.9 倍」的漂亮数字，但那个模型的 GPU 输出是**512 维全零向量**——
+快是因为它根本没算出东西。CPU 路径完全正常，所以没人起疑。
+
+正确做法：所有性能脚本都必须同时输出与 PyTorch 参考的余弦（`cos_vs_torch` 一列），
+低于 0.999 直接判为无效测量。`scripts/export_clip_onnx.py` 已把这条做进导出流程
+（含 GPU 对拍），`bench_exported.py` / `diag_*.py` 也都带这一列。
+
 ## 脚本说明
 
 | 脚本 | 用途 | 关键结论 |
 |---|---|---|
-| `bench_gpu_sweep.py` | GPU/CPU × batch size 扫描 | GPU FP16 bs=1 即饱和：111 ms/img，9.0 img/s；CPU 763 ms |
-| `pipe2.py` | 端到端流水线（解码+推理） | 缩略图路径 8.6 img/s；多解码线程反而更慢 |
+| `export_clip_onnx.py`（上级目录） | 导出静态 shape ONNX + 四段校验 | 视觉 1.00000000 / 文本 0.99999988 / GPU FP16 0.99999 |
+| `bench_exported.py` | 导出产物的 CPU/GPU 多配置性能 + 保真度 | GPU FP16 121 ms，CPU 747 ms，均 cos > 0.99999 |
+| `diag_ovgpu.py` | **复现动态 shape 的 GPU 全零输出** | 静态/动态对照，证明 bug 来源 |
+| `diag_ort_ov_static.py` | ORT-OV EP 静态 vs 动态 shape | 静态下 GPU 121 ms / cos 0.99999511，正常 |
+| `diag_ov_native.py` | 原生 OpenVINO 与 ORT-OV 对照 | 原生 OV GPU 正常（130 ms），证明坏的是动态 shape 不是 GPU |
+| `bench_ov_native.py` | 原生 OV 各 batch 扫描 | GPU f16 bs=16 98 ms；**CPU 仅 0.53 img/s** |
+| `bench_ov_cpu_tune.py` | OV CPU 线程/hint 调优 | 单线程 2778 → 4 线程 1891 ms，并行效率仅 1.47×，不可用 |
+| `fetch_models.sh` | 分块拉取模型产物（CF 隧道会断） | 16MB 一块，逐块重试 + md5 校验 |
+| `bench_gpu_sweep.py` | GPU/CPU × batch size 扫描 | ⚠️ 用的是动态 shape 模型，数字仅作历史参考，结论已被推翻 |
+| `pipe2.py` | 端到端流水线（解码+推理） | ⚠️ 同上，推理段基于错误模型 |
 | `io.py` | IO 与解码成本拆解 | 注意：该脚本按"每轮 N 张"计时，需再除以 N |
 | `thumb.py` | 真实缩略图端到端 | 320 缩略图 → 224 仅 3~5 ms |
 | `dec.py` | 全分辨率解码 vs DCT 降采样 | libjpeg `draft` 139.7 → 18.6 ms（7.5×） |

@@ -14,16 +14,22 @@
 |---|---|
 | 端侧 Agent | **不做**。索引与检索全部在服务端，客户端零推理 |
 | CLIP 模型 | **CN-CLIP ViT-B/16（512 维）**，中文原生，不走"单语种模型 + 翻译" |
-| 推理加速 | **iGPU 可用**，OpenVINO GPU FP16 比 CPU 快 **6.9 倍**（763ms → 111ms） |
-| 推理后端 | **OpenVINO C API**（不引入 onnxruntime，避免自编译 EP） |
+| 推理加速 | **iGPU 可用**，ORT + OpenVINO EP，GPU FP16 比 CPU 快 **6.0 倍**（722ms → 121ms） |
+| 推理后端 | **ONNX Runtime C API + OpenVINO EP**（一套运行时同时覆盖 CPU/GPU） |
+| **模型 shape** | **必须静态**。动态 batch 会让 OpenVINO EP 在 GPU 上静默输出错向量（见 §2.5） |
 | 索引输入 | **缩略图优先**，缺失时解原图并回写缩略图 |
-| 缩略图 | 现有实现有 4 个缺陷（无失效/无 mtime 校验/键碰撞/解码慢），**需先改造**；批量补齐 9,472 张约 2 分钟 |
+| 缩略图 | 现有实现有 4 个缺陷（无失效/无 mtime 校验/键碰撞/解码慢），**已改造完成**；批量补齐 9,472 张约 2 分钟 |
 | 图像解码 | **libjpeg-turbo（DCT 降采样）**。纯 Go 全解码慢 24 倍，不可接受 |
 | 向量检索 | SQLite 存 BLOB + **内存暴力余弦**。14k 条仅 28 MB，无需 HNSW/FAISS |
-| 全量索引耗时 | **14k 张约 27 分钟**（GPU 推理 111ms 是硬下限） |
+| 全量索引耗时 | **14k 张约 29 分钟**（GPU 推理 121ms 是硬下限） |
 | 量化 | **不做**。不牺牲检索精度换空间 |
 
-一句话：**GPU 推理 111ms 是天花板，其余环节都必须压到可忽略，否则总耗时会被放大。**
+一句话：**GPU 推理 121ms 是天花板，其余环节都必须压到可忽略，否则总耗时会被放大。**
+
+> **与初版预研的差异（重要）**：初版写的「GPU 111ms、快 6.9 倍」是无效数据。
+> 那次基准只测了速度、没校验输出，而当时的动态 shape 模型在 GPU 上返回的是
+> 全零向量。修正后结论仍然成立（iGPU 确实能用），但**后端从"原生 OpenVINO
+> C API"改为"ORT C API + OpenVINO EP"**，且模型必须导出静态 shape。详见 §2.5。
 
 ---
 
@@ -72,22 +78,58 @@
 
 所有数据在目标机实测，非估算。复现方法见附录 A。
 
-### 2.1 推理（ViT-B/16，224×224）
+### 2.1 推理（ViT-B/16，224×224，静态 shape，batch=1）
 
-| 后端 | batch | ms/img | img/s |
+| 后端 | 设备/精度 | ms/img | img/s |
 |---|---|---|---|
-| ORT CPU EP, 4 线程 | 1 | 729 | 1.37 |
-| ORT CPU EP, 4 线程 | 8 | 776 | 1.29 |
-| OpenVINO CPU | 1 | 763 | 1.31 |
-| **OpenVINO GPU FP16** | **1** | **111** | **9.00** |
-| OpenVINO GPU FP16 | 8 | 119 | 8.42 |
-| OpenVINO GPU FP16 | 16 | 106 | 9.41 |
-| OpenVINO GPU FP16 | 32 | 110 | 9.10 |
+| ORT CPU EP | CPU / FP32 | 722 | 1.39 |
+| ORT + OpenVINO EP | CPU / FP32 | 747 | 1.34 |
+| 原生 OpenVINO API | CPU / FP32 | 1431–1891 | 0.53–0.70 |
+| **ORT + OpenVINO EP** | **GPU / FP16** | **121** | **8.3** |
+| ORT + OpenVINO EP | GPU / FP16，batch=16 | 103 | 9.7 |
+| 原生 OpenVINO API | GPU / FP16 | 130 | 7.7 |
+| 原生 OpenVINO API | GPU / FP16，batch=16 | 98 | 10.2 |
+| ORT + OpenVINO EP | GPU / FP32 | 258 | 3.9 |
+
+文本编码器（1×64，GPU FP16 / CPU FP32）：
+
+| 后端 | ms |
+|---|---|
+| 原生 OpenVINO GPU FP16 | 19.4 |
+| ORT CPU EP | 52.4 |
+| 原生 OpenVINO CPU FP32 | 62.3 |
 
 关键观察：
-- **batch=1 就基本饱和**（9.0 vs 9.4 img/s），不需要复杂批处理
-- CPU 侧 2 进程 × 2 线程只有 1.44 img/s，**多进程无收益**
-- GPU 首次加载 8.6 s，需要预热
+- **batch=1 就基本饱和**（8.3 vs 9.7 img/s），不做批处理，省掉补齐逻辑
+- CPU 侧多进程无收益，加线程反而更慢（解码与推理抢同一颗 die 的功耗/带宽）
+- **OpenVINO 的 CPU 插件在这颗 Tremont 核上很差**：单线程 2778ms → 4 线程 1891ms，
+  并行效率仅 1.47×，比 ORT 自带的 MLAS 内核慢 2.6 倍（N5105 无 AVX2/FMA）。
+  所以 CPU 回退路径靠 ORT CPU EP，不靠 OpenVINO CPU
+- GPU 首次加载（含编译）3.7–5.2 s，需要预热
+
+### 2.5 动态 shape 在 OpenVINO EP 上的静默错误（关键发现）
+
+同一份 ONNX、同一输入，只改 shape 声明，结果天差地别：
+
+| shape | 设备 | 输出 | 与 PyTorch 余弦 | 结论 |
+|---|---|---|---|---|
+| 动态 batch | CPU EP | 正常 | 1.00000000 | ✅ |
+| 动态 batch | GPU FP16 | **512 维全 0** | 0.0 | ❌ 静默错误 |
+| 动态 batch | GPU FP32 | 全 0 或数值全错 | 0.06 ~ 0.51 | ❌ 静默错误 |
+| 静态 1×3×224×224 | GPU FP16 | 正常 | **0.99999511** | ✅ |
+| 静态 1×3×224×224 | CPU FP32 | 正常 | 1.00000000 | ✅ |
+
+危害在于**不报错、不崩溃、不降级**：调用方拿到的是一组合法的 float32，
+只有和参考实现对比才发现全错。如果直接上线，检索结果会整体失真而无人察觉。
+
+三重防线（已落在 `scripts/export_clip_onnx.py` 里，导出即校验）：
+1. 模型一律导出静态 shape（图像 1×3×224×224，文本 1×64）
+2. 校验里包含「ONNX vs PyTorch 余弦 > 0.999」
+3. 校验里包含「GPU FP16 vs PyTorch 余弦 > 0.999」，GPU 不可用时显式 SKIP 而非 PASS
+4. 校验里包含「同输入连跑两次结果完全一致」，排除未初始化内存导致的抖动
+
+> 注：这个 bug 也解释了为什么初版预研的 111ms 不可信 —— 那次测量用的正是
+> 动态 shape 模型，速度快是因为它根本没算出东西。
 
 ### 2.2 图像解码 → 224
 
@@ -106,10 +148,10 @@
 
 | 索引来源 | 解码 | 推理 | 合计 | 吞吐 | 14k 张 |
 |---|---|---|---|---|---|
-| 320 缩略图 | 4.7 | 111 | **116 ms** | 8.6 img/s | **27 min** |
-| 12 MP 原图（libjpeg draft） | 17 | 111 | 128 ms | 7.8 img/s | 30 min |
-| 12 MP 原图（Go 全解码） | 409 | 111 | 520 ms | 1.9 img/s | 121 min |
-| HEIC 12 MP | 676 | 111 | 787 ms | 1.3 img/s | 3 h |
+| 320 缩略图 | 4.7 | 121 | **126 ms** | 7.9 img/s | **29 min** |
+| 12 MP 原图（libjpeg draft） | 17 | 121 | 138 ms | 7.2 img/s | 32 min |
+| 12 MP 原图（Go 全解码） | 409 | 121 | 530 ms | 1.9 img/s | 124 min |
+| HEIC 12 MP | 676 | 121 | 797 ms | 1.3 img/s | 3 h |
 
 > **基准口径说明**：上述端到端测试的预处理用的是「直接 resize 到 224×224」（拉伸）。
 > 正确的 CLIP 预处理是「短边缩放到 224 + 中心裁剪 224×224」。两者耗时差异可忽略
@@ -118,7 +160,10 @@
 ### 2.4 加速路径探索结论
 
 - ✅ **iGPU 可用**：需 `intel-opencl-icd` + `libze-intel-gpu1`，用户在 `render` 组
-- ❌ **多线程无收益**：CPU 已饱和，加线程反而更慢（解码线程与推理抢同一颗 die 的功耗/带宽）
+  （进程必须能访问 `/dev/dri/renderD128`，容器要透传设备）
+- ✅ **ORT + OpenVINO EP 是可行组合**，但**必须静态 shape**，见 §2.5
+- ❌ **原生 OpenVINO CPU 插件不可用**：比 ORT CPU EP 慢 2.6 倍，Tremont 无 AVX2/FMA
+- ❌ **多线程无收益**：CPU 已饱和，加线程反而更慢
 - ❌ **量化不考虑**：用户明确要求保精度
 - ❌ **降级到 MobileCLIP2 + 翻译**：不需要了，GPU 已够快
 
@@ -132,7 +177,7 @@
 
 **理由**：
 - 中文原生，文本塔是 RoBERTa-wwm，不需要"英文模型 + 翻译"的二次误差
-- 17.6 GFLOPs，iGPU 上 9 img/s，14k 张 27 分钟
+- 17.6 GFLOPs，iGPU 上 8.3 img/s，14k 张 29 分钟
 - 512 维向量，14k 条只占 28 MB
 
 **否决项**：
@@ -141,22 +186,37 @@
 
 **模型文件用 git-lfs 管理**，不入 Docker 镜像。
 
-### D2 推理后端：OpenVINO C API（不引入 onnxruntime）
+### D2 推理后端：ONNX Runtime C API + OpenVINO EP
 
-**决策**：Go 通过 CGO 直接调用 OpenVINO C API，用其 ONNX frontend 直接加载 `.onnx`。
+**决策**：Go 通过 CGO 调用 **onnxruntime C API**（`OrtGetApiBase`），provider 选
+`OpenVINOExecutionProvider`，`device_type` 在 `GPU` / `CPU` 间切换。模型导出静态 shape。
 
 **理由**：
-- OpenVINO 官方 pip 包里已确认同时提供 `libopenvino_c.so`、`libopenvino_onnx_frontend.so`、`libopenvino_intel_gpu_plugin.so`（2025.4.1）
-- 避免自编译 onnxruntime（`--use_openvino` 需要 cmake 全量构建，30+ 分钟，镜像巨大）
-- 单一原生依赖，CPU/GPU 都走同一套 API，`device` 只需换字符串
-- OpenVINO 官方提供 Ubuntu 24.04 apt 源与 `openvino/ubuntu24_runtime` 镜像
+- **一套运行时同时覆盖 CPU 和 GPU**：GPU FP16 121 ms，CPU FP32 747 ms，只是
+  `provider_options` 里换个字符串
+- 官方 `onnxruntime-openvino` 预编译包已自带完整的 OpenVINO 运行库，
+  **不需要 `--use_openvino` 自编译**（这是初版判断错的地方）：
+  ```
+  onnxruntime/capi/
+    libonnxruntime.so.1.24.1
+    libonnxruntime_providers_openvino.so
+    libopenvino.so / libopenvino_c.so / libopenvino_intel_gpu_plugin.so
+    libopenvino_intel_cpu_plugin.so / libopenvino_onnx_frontend.so / libtbb.so
+  ```
+  容器里直接把这批 `.so` 拷进去、设 `LD_LIBRARY_PATH` 即可
+- ORT 的 C API 是稳定 ABI（`OrtApi` 函数表），CGO 绑定面比 OpenVINO C API 更小
+- CPU 侧 ORT 自带 MLAS 内核比 OpenVINO CPU 插件快 2.6 倍（722 vs 1891 ms），
+  同一套运行时天然拿到这个优势
 
 **否决项**：
-- onnxruntime + OpenVINO EP：官方预编译包不含该 EP，必须自编译
+- 原生 OpenVINO C API：GPU 性能相当（130 ms），但 **CPU 只有 0.53 img/s**，
+  等于放弃 CPU 回退路径；且要多维护一套绑定
 - Python 子进程 sidecar：引入 Python 运行时，破坏单二进制交付
-- onnxruntime CPU EP：763 ms，14k 需 3 小时，不可接受
+- 动态 shape：GPU 上静默输出错向量，见 §2.5
 
-**降级策略**：`device` 按 `GPU → CPU` 探测，GPU 不可用时降级并记录日志，功能不中断（只是慢 6.9 倍）。
+**降级策略**：`device` 按 `GPU → CPU` 探测。GPU 不可用时降级并**在日志与
+`/semantic/status` 里显式暴露 `device=cpu`**，因为此时索引会慢 6 倍（14k 需约 3 小时），
+用户必须知道。启动时若 GPU 探测失败，额外打一条 WARN。
 
 ### D3 图像解码：libjpeg-turbo（CGO）+ libheif（CGO）
 
@@ -208,7 +268,9 @@ Windows 本地开发默认走 `!cgo` 分支，保证无 gcc 也能编译。
 
 ### D6 文本编码在 CPU 上实时执行
 
-查询时用 OpenVINO CPU 跑文本塔（RoBERTa-wwm-base，输入 ~32 token），预计 10~30 ms。加一层 LRU 缓存（容量 256）避免重复编码同一查询。
+查询时跑文本塔（RoBERTa-wwm-base，静态 1×64）：GPU FP16 19.4 ms、ORT CPU 52.4 ms。
+默认走 GPU（与视觉编码器同一个 session 池），GPU 不可用时退回 CPU。
+加一层 LRU 缓存（容量 256）避免重复编码同一查询。
 
 ---
 
@@ -232,26 +294,26 @@ Windows 本地开发默认走 `!cgo` 分支，保证无 gcc 也能编译。
 │  │ service                                          │    │
 │  │  SearchService   查询编码 + 暴力余弦 + 过滤        │    │
 │  │  IndexService    遍历 / 变更检测 / 流水线 / job    │    │
-│  │  ThumbnailService 缩略图（含 mtime 校验，待修）    │    │
+│  │  ThumbnailService 缩略图（含 mtime 校验，已改造）  │    │
 │  │  DedupService / HashService（P0）                 │    │
 │  └───────────────────┬──────────────────────────────┘    │
 │                      │                                   │
 │  ┌───────────────────▼──────────────────────────────┐    │
 │  │ internal/ai  (CGO)                                │    │
 │  │  Encoder   图像/文本 → 向量                        │    │
-│  │  Session   封装 OpenVINO compiled_model           │    │
+│  │  Session   封装 ORT session（静态 shape）          │    │
 │  │  Decoder   libjpeg-turbo / libheif                │    │
 │  └───────────────────┬──────────────────────────────┘    │
 └──────────────────────┼──────────────────────────────────┘
                        │
         ┌──────────────┴───────────────┐
         │                              │
-┌───────▼────────┐          ┌──────────▼─────────┐
-│ OpenVINO       │          │ SQLite (WAL)        │
-│  GPU plugin    │          │  media_asset        │
-│  (iGPU FP16)   │          │  media_embedding    │
-│  CPU plugin    │          │  job / file_hash …  │
-└────────────────┘          └─────────────────────┘
+┌───────▼────────────┐          ┌──────▼─────────────┐
+│ onnxruntime        │          │ SQLite (WAL)        │
+│  OpenVINO EP       │          │  media_asset        │
+│  (iGPU FP16)       │          │  media_embedding    │
+│  CPU EP (FP32)     │          │  job / file_hash …  │
+└────────────────────┘          └─────────────────────┘
 ```
 
 ---
@@ -401,7 +463,7 @@ GET  /api/thumb/status     → { total, done, missing, orphan, running }
 
 1. **Web 浏览立刻全部可用**——现在 67.8% 的图点开要等 530 ms
 2. **解耦**——缩略图是 Web 功能，不该被 AI 索引绑架；AI 关闭时也该能补齐
-3. **重建索引成本恒定**——换模型后不用再碰原图，恒 27 分钟
+3. **重建索引成本恒定**——换模型后不用再碰原图，恒 29 分钟
 
 **结论：两条都做。** Backfill 作为独立任务（用户可随时触发），索引侧仍保留"缺失则解原图并回写"的兜底，保证索引不依赖 backfill 是否跑过。
 
@@ -425,6 +487,7 @@ GET  /api/thumb/status     → { total, done, missing, orphan, running }
       → 输出 224×224×3 float32（已归一化，CHW 布局）
       ↓
 [4] 推理（encoder，1 个 goroutine，GPU 串行）
+      模型静态 1x3x224x224，逐张推理（不要改动态 batch，见 §2.5）
       → 512 维向量，L2 归一化
       ↓
 [5] 落库（writer，批量 64 条一个事务）
@@ -453,15 +516,17 @@ GET  /api/thumb/status     → { total, done, missing, orphan, running }
 
 ### 7.3 并发模型
 
-**关键：不要盲目加线程。** 实测 2 个解码线程反而从 8.96 掉到 4.46 img/s（CPU 与 iGPU 共享功耗预算，且推理本身已用满核心）。
+**关键：不要盲目加线程。** 解码只占 4.7~17 ms，推理占 121 ms，解码侧并行带来的
+收益上限只有 10% 左右，而两者抢同一颗 die 的功耗/带宽预算，实测加解码线程后
+端到端反而变慢。单解码 goroutine 就够。
 
 推荐配置：
 
 | 阶段 | goroutine 数 | 说明 |
 |---|---|---|
 | walker | 1 | 只做 stat，IO 轻 |
-| decoder | 1（可配 2） | 4.7~17 ms，远小于推理 111 ms，无需并行 |
-| encoder | **1** | GPU 串行，batch=1 已饱和 |
+| decoder | 1（可配 2） | 4.7~17 ms，远小于推理 121 ms，无需并行 |
+| encoder | **1** | GPU 串行，batch=1 已饱和（8.3 vs batch=16 的 9.7 img/s） |
 | writer | 1 | 批量提交 |
 
 用**有界 channel**（容量 8）串起来，形成背压：推理慢时自动阻塞解码，不会堆积内存。
@@ -491,7 +556,7 @@ GET  /api/thumb/status     → { total, done, missing, orphan, running }
 - `index.throttle_ms`：每张图后 sleep，默认 0
 - `index.batch_pause`：每 N 张暂停 M ms
 
-Web 请求与索引共存时，GPU 推理会抢占；实测单张 111 ms 的延迟抖动对检索（同样要过 GPU）影响可感知。**建议索引任务在低峰期执行**，前端提供"夜间索引"选项。
+Web 请求与索引共存时，GPU 推理会抢占；实测单张 121 ms 的延迟抖动对检索（同样要过 GPU）影响可感知。**建议索引任务在低峰期执行**，前端提供"夜间索引"选项。
 
 ---
 
@@ -586,11 +651,16 @@ GET  /api/index/jobs                          → 复用 P0 的 job 列表
 ```
 GET /api/index/health
 200 { "ok":true, "data":{
-      "backend":"openvino-2025.4.1",
+      "backend":"onnxruntime-openvino-1.24.1",
       "device":"GPU", "gpu_name":"Intel UHD Graphics",
       "image_model_loaded":true, "text_model_loaded":true,
-      "warmup_ms":8612, "dim":512 } }
+      "warmup_ms":3700, "dim":512,
+      "selftest":{"image_cos":0.99999,"text_cos":0.99999,"pass":true} } }
 ```
+
+`selftest` 是启动时用 `golden.npz` 做的自检。**它是必需的，不是可选的**：
+GPU 路径出问题时不会报错，只会给出错向量（§2.5），没有这一项就无法在部署后
+发现环境变化（换驱动、换容器基底、EP 版本漂移）导致的质量退化。
 
 ---
 
@@ -619,6 +689,7 @@ GET /api/index/health
     "throttle_ms": 0,
     "prefer_thumbnail": true,
     "writeback_thumbnail": true,
+    "selftest": true,
     "search": {
       "default_limit": 50,
       "text_min_score": 0.18,
@@ -629,7 +700,10 @@ GET /api/index/health
 }
 ```
 
-- `device` 支持 `GPU` / `CPU` / `AUTO`，探测失败自动降级到 `CPU` 并写日志
+- `device` 支持 `GPU` / `CPU`，探测失败自动降级到 `CPU` 并打 WARN（慢 6 倍，必须可见）
+- `precision` 仅 GPU 生效，`FP16` 实测余弦 0.99999，无精度顾虑
+- `batch_size` 恒为 1（模型是静态 shape，改了会出错，见 §2.5）
+- `selftest` 打开时启动会用 `golden.npz` 对拍，失败则 `enabled` 自动置 false 并记录原因
 - `thumbnail.key` 仅 `sha1` 一个取值（保留字段是为了后续可扩展，旧值 `path` 不再支持）
 - `thumbnail.max_size` / `jpeg_quality` **不要随意调**：索引侧假设短边 ≥ 224
 
@@ -639,7 +713,8 @@ GET /api/index/health
 
 ### 11.1 镜像改造（重要）
 
-当前 `server/Dockerfile.server` 是 **alpine + `CGO_ENABLED=0`**，无法承载 OpenVINO / libjpeg-turbo / libheif（均为 glibc 构建）。必须改为 Debian 基底：
+当前 `server/Dockerfile.server` 是 **alpine + `CGO_ENABLED=0`**，无法承载
+onnxruntime / OpenVINO / libjpeg-turbo / libheif（均为 glibc 构建）。必须改为 Debian 基底。
 
 ```dockerfile
 # ---- 构建阶段 ----
@@ -649,23 +724,37 @@ ENV GOPROXY=https://goproxy.cn,direct
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ .
-RUN CGO_ENABLED=1 go build -tags openvino -ldflags="-s -w" -o mini-nas-server ./cmd/server
+RUN CGO_ENABLED=1 go build -tags cgo -ldflags="-s -w" -o mini-nas-server ./cmd/server
 
 # ---- 运行阶段 ----
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates tzdata ffmpeg \
-      libjpeg-turbo-progs libjpeg62-turbo \
-      libheif1 \
-      libopenvino2025 \
+      ca-certificates tzdata \
+      libjpeg62-turbo libheif1 \
       intel-opencl-icd libze-intel-gpu1 \
     && rm -rf /var/lib/apt/lists/*
-# OpenVINO 运行库若 apt 源未提供，改为 COPY --from=openvino/ubuntu24_runtime:2025.4.1 /opt/intel/openvino/runtime /opt/intel/openvino/runtime
-ENV LD_LIBRARY_PATH=/opt/intel/openvino/runtime/lib/intel64
+
+# onnxruntime + OpenVINO 运行库：直接从官方 wheel 取，不必自编译
+# 依赖 py3-none-manylinux wheel，内含 libonnxruntime.so / libopenvino*.so 全套
+COPY --from=python:3.12-slim /tmp/ort /opt/ort
+ENV LD_LIBRARY_PATH=/opt/ort
+
 WORKDIR /app
 COPY --from=builder /build/mini-nas-server .
 ENTRYPOINT ["./mini-nas-server", "-config", "/data/config.json", "-data", "/data"]
 ```
+
+取运行库的做法（构建机上执行一次，产物入库或走 CI 缓存）：
+
+```bash
+pip download onnxruntime-openvino==1.24.1 --no-deps -d /tmp/ortwheel
+cd /tmp/ortwheel && unzip -j *.whl 'onnxruntime/capi/*.so*' -d /tmp/ort
+```
+
+> 注意：**不要同时装 `onnxruntime` 和 `onnxruntime-openvino`**。两者会把不同版本的
+> `libonnxruntime.so` 装进同一个目录（实测出现 1.31.1 与 1.24.1 并存），
+> 运行时到底加载哪个取决于 `LD_LIBRARY_PATH` 顺序，属于随机故障源。
+> 只用 `onnxruntime-openvino`，它自带主库和 EP。
 
 ### 11.2 docker-compose 增补
 
@@ -685,7 +774,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - HOST_ROOT=/host
-      - LD_LIBRARY_PATH=/opt/intel/openvino/runtime/lib/intel64
+      - LD_LIBRARY_PATH=/opt/ort
 ```
 
 **宿主前置条件**（目标机已完成）：
@@ -699,28 +788,52 @@ ls /dev/dri/                       # 应有 card1 与 renderD128
 ### 11.3 模型入库（git-lfs）
 
 ```
-models/cn-clip-vit-b16/
-  image_encoder.onnx     # ~350 MB
-  text_encoder.onnx      # ~400 MB
-  vocab.txt
-  merges.txt
-  tokenizer.json
-  meta.json              # {"model_id","dim":512,"image_size":224,"mean":[...],"std":[...]}
+server/models/cn-clip-vit-b16/
+  image_encoder.onnx     # 328.9 MB  静态 1x3x224x224 -> 1x512
+  text_encoder.onnx      # 389.5 MB  静态 1x64 -> 1x512
+  vocab.txt              # 21130 tokens，行号即 token id
+  meta.json              # 维度/输入名/归一化参数/静态 shape 声明
+  golden.npz             # 0.5 MB 黄金样本，Go 侧对拍用
+  verify.json            # 导出校验报告
 ```
 
 `.gitattributes`：
 
 ```
 *.onnx filter=lfs diff=lfs merge=lfs -text
+*.npz  filter=lfs diff=lfs merge=lfs -text
 ```
 
-模型导出用 `scripts/export_clip_onnx.py`（已写好，待实跑验证）。
+**配额提醒**：两份 ONNX 合计 718 MB。GitHub 免费 LFS 只有 1 GB 存储 + 1 GB/月流量，
+这会占 72%，且每次全新 clone 就消耗掉大部分月流量。若配额紧张，可改为：
+- 只把 `meta.json` / `vocab.txt` / `golden.npz` 入库（< 1 MB），ONNX 走 release 附件
+- 或部署时用 `scripts/export_clip_onnx.py` 现场导出（需 Python + torch，约 4 分钟）
+
+**导出与校验**（`scripts/export_clip_onnx.py`，已实跑验证）：
+
+```bash
+# 全量导出 + 四段校验（数值一致性 / 确定性 / 语义 / GPU 保真度）
+python scripts/export_clip_onnx.py --model /path/to/cnclip-b16 \
+    --out server/models/cn-clip-vit-b16
+
+# 只校验（不加载 torch，用 golden.npz 复算）
+python scripts/export_clip_onnx.py --out server/models/cn-clip-vit-b16 --verify-only
+```
+
+权重获取（HF 不可达时走 ModelScope）：
+
+```bash
+ID=AI-ModelScope/chinese-clip-vit-base-patch16
+for f in config.json preprocessor_config.json vocab.txt pytorch_model.bin; do
+  curl -L "https://www.modelscope.cn/api/v1/models/$ID/repo?Revision=master&FilePath=$f" -o "$f"
+done
+```
 
 ### 11.4 本地开发（Windows，无 gcc）
 
 ```bash
 go build ./...                              # 默认 !cgo，AI 返回 503，其余功能正常
-go build -tags openvino ./cmd/server        # 需 gcc + OpenVINO，仅 Linux
+go build -tags cgo ./cmd/server             # 需 gcc + onnxruntime，仅 Linux
 ```
 
 ---
@@ -729,14 +842,37 @@ go build -tags openvino ./cmd/server        # 需 gcc + OpenVINO，仅 Linux
 
 | 阶段 | 内容 | 交付物 | 验收标准 |
 |---|---|---|---|
-| **P0** | 去重（MD5 / 扫描 / 合并） | 已完成 | 本地 9 个场景全部通过 |
-| **P1** | 模型导出与入库 | `models/` + lfs | ONNX 在 Python 下输出与 PyTorch 一致（余弦 > 0.999） |
+| **P0** | 去重（MD5 / 扫描 / 合并） | ✅ 已完成（`eb298ad`） | 本地 9 个场景全部通过 |
+| **P0.1** | 全新部署默认挂载点修复 | ✅ 已完成（`d73a360`） | `e2e_fresh_deploy.sh` 通过 |
+| **P1** | 模型导出与入库 | ✅ 导出已完成并校验 | ONNX 输出与 PyTorch 余弦 > 0.999（实测 1.00000000 / 0.99999988） |
+| **P2.5** | 缩略图子系统改造（§6） | ✅ 已完成（`34d8f2e`） | 覆盖率 100%；覆盖后不再返回旧图；backfill 可跑 |
 | **P2** | `internal/ai` 推理内核 | CGO 封装 + 自检命令 | `server -selftest` 打印 device / warmup / 单图耗时 |
-| **P2.5** | **缩略图子系统改造**（§6） | `ThumbnailService` 重写 + backfill 任务 | 覆盖率 100%；同路径覆盖后不再返回旧图；9,472 张补齐 < 5 分钟 |
 | **P3** | 索引流水线 | `IndexService` + `/api/index/*` | 14k 张全量 < 40 分钟，可取消、可续跑 |
 | **P4** | 检索 API | `/api/search/*` | 中文查询 top-10 人工相关度 ≥ 7/10 |
 | **P5** | 前端 | Web 搜索页 + Android 入口 | 端到端可用 |
 | **P6** | 校准与调优 | 分数阈值 + 并发参数 | 误检率可接受，GPU 利用率稳定 |
+
+### P1 交付状态（已完成）
+
+产物在 `server/models/cn-clip-vit-b16/`，四段校验全绿：
+
+```
+[PASS] image: cos min=1.00000000  deterministic=True
+[PASS] text:  cos min=0.99999988  deterministic=True
+[PASS] semantics: 猫/小猫 0.9174 > 猫/汽车 0.5508 ；日落/黄昏落日 0.9629 > 日落/打印机 0.6343
+[PASS] GPU FP16 image: cos=0.99999517
+[PASS] GPU FP16 text:  cos=0.99999702
+```
+
+`golden.npz` 里有固定输入 + PyTorch 参考输出，Go 侧做完预处理和推理后
+可以直接对拍，**不需要 Python 环境就能验证自己算得对不对**：
+
+```go
+// 伪代码：P2 自检用
+fx := loadNPZ("golden.npz")
+got := encoder.Image(fx.PixelValues)          // 你的实现
+if cos(got, fx.ImageEmbeds) < 0.999 { fail() } // 直接判定
+```
 
 ### P2.5 拆分（缩略图，必须先于索引）
 
@@ -754,20 +890,29 @@ go build -tags openvino ./cmd/server        # 需 gcc + OpenVINO，仅 Linux
 
 ### P2 拆分（最关键，风险最高）
 
-1. `internal/ai/openvino.go` — CGO 绑定：`ov_core_create` / `ov_core_read_model` / `ov_core_compile_model` / `ov_compiled_model_create_infer_request` / `ov_infer_request_infer`
+1. `internal/ai/ort.go` — CGO 绑定 onnxruntime C API：
+   `OrtGetApiBase` → `CreateEnv` / `CreateSessionOptions` /
+   `SessionOptionsAppendExecutionProvider_OpenVINO`（`device_type=GPU` + `precision=FP16`）/
+   `CreateSession` / `CreateTensorWithDataAsOrtValue` / `Run`。
+   注意 `OrtApi` 是函数指针表，CGO 里要用 `static` 内联包装函数转发，不能直接跨语言取结构体成员
 2. `internal/ai/encoder.go` — 图像预处理（短边缩放 + 中心裁剪 + 归一化 + CHW）与后处理（L2 归一化）
 3. `internal/ai/decode_cgo.go` — libjpeg-turbo（`scale_denom`）+ libheif
 4. `internal/ai/stub.go` — `!cgo` 空实现，返回 `ErrUnavailable`
-5. `internal/ai/selftest.go` — 启动自检与预热
+5. `internal/ai/selftest.go` — 启动自检与预热（**含 golden.npz 对拍**）
 6. **`internal/ai/tokenizer.go` — BERT WordPiece 分词器（Go 实现）**
+
+> **静态 shape 是硬约束。** 会话创建后输入维度固定为 `1x3x224x224` 和 `1x64`。
+> 任何"顺手支持一下动态 batch"的改动都会把 GPU 输出打坏（§2.5），
+> 且不会报错。批处理要在 Go 侧循环调用，不要改模型。
 
 > **第 6 项容易被低估。** 导出脚本只产出 `vocab.txt`（一行一个 token，行号即 id），
 > Go 侧需要自己实现：BasicTokenizer（含中文按字切分、小写化、标点切分）+ WordPiece
-> 贪心最长匹配 + `[CLS]`/`[SEP]` 包装 + `attention_mask` 生成。
+> 贪心最长匹配 + `[CLS]`/`[SEP]` 包装 + `attention_mask` 生成 + **padding 到 64**。
 > 约 200~300 行，可参考 `sugarme/tokenizer` 的实现方式，但建议手写以精确对齐
 > `BertTokenizer(do_lower_case=True)` 的行为。
 > **验收**：同一批中文 query，Go 输出的 `input_ids` 与 Python
-> `ChineseCLIPProcessor` 完全一致（逐 token 比对）。
+> `ChineseCLIPProcessor` 完全一致（逐 token 比对）。`golden.npz` 里的
+> `text_input_ids` / `sem_input_ids` 可直接当测试向量。
 
 ### P3 拆分
 
@@ -783,18 +928,20 @@ go build -tags openvino ./cmd/server        # 需 gcc + OpenVINO，仅 Linux
 
 | 编号 | 风险 | 影响 | 缓解 |
 |---|---|---|---|
-| R1 | OpenVINO C API 的 Go 封装工作量被低估 | P2 延期 | 先做最小闭环（单图推理），跑通再扩；参考 `openvino/c` 头文件 |
-| R2 | 容器内 GPU 直通失败 | 退回 CPU，慢 6.9× | 先裸机验证（已完成），再验证容器；`/api/index/health` 暴露 device |
+| R1 | onnxruntime C API 的 Go 封装工作量被低估（`OrtApi` 是函数指针表） | P2 延期 | 先做最小闭环（单图推理 + golden 对拍），跑通再扩；用 C 静态内联函数转发 |
+| R2 | 容器内 GPU 直通失败 | 退回 CPU，慢 6 倍（14k 约 3 小时） | 裸机已验证；`/api/index/health` 必须暴露 `device` |
 | R3 | Debian 上 `libheif1` 编译/运行异常 | HEIC 索引失败 | 单张失败记 `error` 字段跳过，不中断任务；必要时换 `heif-convert` 子进程 |
-| R4 | 缩略图子系统四个缺陷 T1~T4（§6.3） | 索引到过期内容 / 显示旧图 / 缓存泄漏 | 提到 **P2.5** 独立处理，先于索引流水线 |
-| R5 | ViT-L/14 吞吐**未实测**（HF 下载受阻，`huggingface.co` 不可达、`hf-mirror.com` 慢到超时） | 无法确认是否值得换大模型 | 按 FLOPs 推算约 500 ms/img，已足以否决；若后续要重估，用 `HF_ENDPOINT=https://hf-mirror.com` 重试 |
-| R6 | OpenVINO 首次加载 8.6 s | 首次检索卡顿 | 启动后异步预热，`/api/index/health` 暴露 `warmup_ms` |
-| R7 | `MountService.AddDefaultMount` 是死代码 | 全新部署零挂载，首次上传必失败 | **P0 遗留 bug，需单独修**：在启动时若挂载表为空则创建默认挂载 |
+| R4 | 缩略图子系统四个缺陷 T1~T4（§6.3） | 索引到过期内容 / 显示旧图 / 缓存泄漏 | ✅ 已在 P2.5 修复 |
+| R5 | ViT-L/14 吞吐**未实测**（HF 不可达） | 无法确认是否值得换大模型 | 按 FLOPs 推算约 500 ms/img，已足以否决 |
+| R6 | 首次加载 3.7~5.2 s（含 GPU 编译） | 首次检索卡顿 | 启动后异步预热，`/api/index/health` 暴露 `warmup_ms` |
+| R7 | `MountService.AddDefaultMount` 是死代码 | 全新部署零挂载，首次上传必失败 | ✅ 已修（`d73a360`） |
 | R8 | 索引期间 Web 卡顿 | 体验差 | `throttle_ms` + 夜间任务；检索与索引共用 GPU 需排队 |
 | R9 | 纯 Go 解码路径（409 ms）未做并发优化 | `!cgo` 构建下索引极慢 | 仅用于开发，不做性能承诺；文档标注 |
-| R10 | Go 侧 BERT 分词器与 Python 不一致 | 查询向量偏移，检索质量下降 | 用固定 30 条中英混合 query 做 token 级对拍，纳入 P2 验收 |
-| R11 | 导出脚本未产出 `tokenizer.json` | 需手写分词器 | 已写入 P2 第 6 项；如需省事可改脚本用 `tokenizer.save_pretrained()` 额外导出 |
-| R12 | 缩略图缓存键切换为哈希是破坏性变更 | 现有 4,508 个有效缩略图需重建 | 重建仅需 ~2 分钟；可在 backfill 任务里一次性完成，用户无感 |
+| R10 | Go 侧 BERT 分词器与 Python 不一致 | 查询向量偏移，检索质量下降 | 用 `golden.npz` 的 `text_input_ids` 做 token 级对拍，纳入 P2 验收 |
+| R11 | **OpenVINO EP 动态 shape 静默输出错向量**（§2.5） | 检索整体失真且无任何报错 | 模型强制静态 shape；导出脚本内置 GPU 对拍；P2 自检也必须跑 golden 对拍 |
+| R12 | 缩略图缓存键切换为哈希是破坏性变更 | 现有 4,508 个有效缩略图需重建 | ✅ 已随 P2.5 完成，重建约 2 分钟 |
+| R13 | **模型 718 MB 超出 GitHub 免费 LFS 配额舒适区**（1 GB 存储 / 1 GB 月流量） | 全新 clone 失败或超限 | 见 §11.3 的三种处置方案，需用户确认 |
+| R14 | `onnxruntime` 与 `onnxruntime-openvino` 同时安装导致版本混装 | 运行时加载到错误主库，随机故障 | 只装 `onnxruntime-openvino`，Dockerfile 里固定版本 |
 
 ---
 
@@ -809,17 +956,35 @@ sudo usermod -aG render $USER
 python3 -m venv /tmp/bench && /tmp/bench/bin/pip install \
   onnxruntime-openvino numpy pillow pillow-heif
 
-# 推理基准（必须用 sg render 切换组，否则 GPU 不可见）
-sg render -c "/tmp/bench/bin/python scripts/bench/bench_gpu_sweep.py"
+# 模型导出 + 四段校验（含 GPU 保真度）
+sg render -c "/tmp/bench/bin/python scripts/export_clip_onnx.py \
+  --model /tmp/bench/cnclip-b16 --out /tmp/bench/out/cn-clip-vit-b16"
 
-# 端到端基准
-sg render -c "/tmp/bench/bin/python scripts/bench/pipe2.py"
+# 只校验（快，不加载 torch）
+sg render -c "/tmp/bench/bin/python scripts/export_clip_onnx.py \
+  --out /tmp/bench/out/cn-clip-vit-b16 --verify-only"
+
+# 导出产物的性能 + 保真度（CPU/GPU 各配置）
+sg render -c "/tmp/bench/bin/python scripts/bench/bench_exported.py \
+  --model /tmp/bench/out/cn-clip-vit-b16"
+
+# 动态 shape 的 GPU 错误复现（诊断用，证明 §2.5）
+sg render -c "/tmp/bench/bin/python scripts/bench/diag_ovgpu.py"
+sg render -c "/tmp/bench/bin/python scripts/bench/diag_ort_ov_static.py"
+
+# 原生 OpenVINO 对照（证明 GPU 本身没问题，坏的是动态 shape）
+sg render -c "/tmp/bench/bin/python scripts/bench/bench_ov_native.py"
 
 # 缩略图尺寸分布
 /tmp/bench/bin/python scripts/bench/sz.py
 ```
 
-**注意**：GPU 测试必须经 `sg render -c`，否则 OpenVINO 报 `Device GPU is not available` 并静默回退 CPU（表现为 722 ms，极易误判）。
+**两个必须知道的陷阱**：
+
+1. GPU 测试必须经 `sg render -c`，否则 OpenVINO 报 `Device GPU is not available` 并
+   静默回退 CPU（表现为 722 ms，极易误判）。
+2. **只测速度不测数值的基准等于没测。** 初版预研就因为漏了这一步，把"GPU 返回全零
+   向量"当成了"GPU 快 6.9 倍"。所有性能脚本都必须带 `cos_vs_torch` 一列。
 
 ## 附录 B：P0 已交付能力（本期依赖）
 
