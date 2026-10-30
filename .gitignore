@@ -48,3 +48,6 @@ server/bin/
 # 但小体积的测试夹具要入库（meta/vocab/golden/preproc_golden，合计约 830KB），
 # 否则新 clone 下来跑不了 Go 侧对拍测试。
 server/models/**/*.onnx
+
+# setup_model.sh 的权重下载缓存（PyTorch 原始权重，719MB）
+.models-src/
