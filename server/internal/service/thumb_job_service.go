@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -39,15 +40,18 @@ type ThumbJobService struct {
 	workers int
 	// prune 为 true 时顺带清理不再对应任何源文件的缓存。
 	prune bool
+	// dataDir 是数据目录，收集源文件时要整棵跳过。
+	dataDir string
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
 
 	// 图片源清单的短期缓存，见 sourceTTL。
-	srcMu    sync.Mutex
-	srcCache []string
-	srcAt    time.Time
-	srcValid bool
+	srcMu     sync.Mutex
+	srcCache  []string
+	keepCache map[string]struct{}
+	srcAt     time.Time
+	srcValid  bool
 }
 
 func NewThumbJobService(
@@ -57,6 +61,7 @@ func NewThumbJobService(
 	fileSvc *FileService,
 	workers int,
 	prune bool,
+	dataDir string,
 ) *ThumbJobService {
 	if workers <= 0 {
 		workers = 4
@@ -68,6 +73,7 @@ func NewThumbJobService(
 		fileSvc: fileSvc,
 		workers: workers,
 		prune:   prune,
+		dataDir: dataDir,
 		running: map[string]context.CancelFunc{},
 	}
 }
@@ -149,14 +155,9 @@ type ThumbStatus struct {
 // 不再对每个源文件单独 Stat——大库下这是从 8 秒降到几十毫秒的关键。
 func (s *ThumbJobService) Status() ThumbStatus {
 	var st ThumbStatus
-	srcs := s.sourcesSnapshot()
+	srcs, keep := s.sourcesSnapshot()
 	st.Mounts = len(s.mounts.List())
 	st.Images = len(srcs)
-
-	keep := make(map[string]struct{}, len(srcs))
-	for _, p := range srcs {
-		keep[filepath.Base(s.thumbs.CachePath(p))] = struct{}{}
-	}
 
 	// 缓存目录一次读全，键为文件名、值为大小。
 	cached := make(map[string]int64)
@@ -198,19 +199,26 @@ func (s *ThumbJobService) Status() ThumbStatus {
 	return st
 }
 
-// sourcesSnapshot 返回缓存的图片源清单，超过 sourceTTL 才重新遍历。
-func (s *ThumbJobService) sourcesSnapshot() []string {
+// sourcesSnapshot 返回缓存的图片源清单及其缓存键集合，超过 sourceTTL 才重新遍历。
+//
+// 缓存键集合也一并缓存：它要对每个源文件算一次 SHA-1，两万个文件约 200ms，
+// 每次调用都重算的话热路径依然快不起来。
+func (s *ThumbJobService) sourcesSnapshot() ([]string, map[string]struct{}) {
 	s.srcMu.Lock()
 	defer s.srcMu.Unlock()
 
 	if s.srcValid && time.Since(s.srcAt) < sourceTTL {
-		return s.srcCache
+		return s.srcCache, s.keepCache
 	}
 	srcs := s.collectSources()
-	s.srcCache = srcs
+	keep := make(map[string]struct{}, len(srcs))
+	for _, p := range srcs {
+		keep[filepath.Base(s.thumbs.CachePath(p))] = struct{}{}
+	}
+	s.srcCache, s.keepCache = srcs, keep
 	s.srcAt = time.Now()
 	s.srcValid = true
-	return srcs
+	return srcs, keep
 }
 
 // PruneResult 是一次孤儿缓存清理的结果。
@@ -241,15 +249,49 @@ func (s *ThumbJobService) Prune() (PruneResult, error) {
 }
 
 // collectSources 遍历所有挂载，收集可解码的图片绝对路径。
+//
+// 会整棵跳过数据目录与缩略图缓存目录。这两处完全可能落在某个挂载点里面：
+// 本机部署把仓库放在 /mnt/nas/dev 下，data 目录随之被 dev 挂载覆盖，
+// 缓存目录和挂载点里的路径只是同一 inode 的两个别名。
+// 不排除的话，缓存里的缩略图会被当成源图片，补齐任务给缩略图再生成缩略图，
+// 下一轮这些新文件又成了源——缓存会无界增长。
+//
+// 按 inode 判等（os.SameFile）而不是比字符串前缀，正是因为路径可能有两个别名。
 func (s *ThumbJobService) collectSources() []string {
+	// 挂载根自身不跳过：真有人把数据目录直接挂出来时，跳了就等于一张图都扫不到。
+	var skipDirs []os.FileInfo
+	for _, d := range []string{s.thumbs.CacheDir, s.dataDir} {
+		if d == "" {
+			continue
+		}
+		if info, err := os.Stat(d); err == nil {
+			skipDirs = append(skipDirs, info)
+		}
+	}
+
 	var out []string
 	for _, m := range s.mounts.List() {
 		root := s.fileSvc.AbsPath(m.Name)
 		if root == "" {
 			continue
 		}
-		filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-			if err != nil || info == nil || info.IsDir() {
+		filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if p == root {
+					return nil
+				}
+				info, err := d.Info()
+				if err != nil {
+					return nil
+				}
+				for _, skip := range skipDirs {
+					if os.SameFile(info, skip) {
+						return fs.SkipDir
+					}
+				}
 				return nil
 			}
 			if imgcodec.Supports(p) {

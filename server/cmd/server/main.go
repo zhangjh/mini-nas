@@ -90,7 +90,7 @@ func main() {
 
 	thumbJobs := service.NewThumbJobService(
 		db, mountSvc, thumbSvc, fileSvc,
-		cfg.Thumbnail.BackfillWorkers, cfg.Thumbnail.PruneOrphans,
+		cfg.Thumbnail.BackfillWorkers, cfg.Thumbnail.PruneOrphans, cfg.DataDir,
 	)
 
 	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc, userSvc, hashSvc, dedupSvc, thumbJobs)
