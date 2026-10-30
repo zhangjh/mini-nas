@@ -290,19 +290,32 @@ func (d *DB) LoadEmbeddings(modelID string) ([]EmbeddingRow, error) {
 }
 
 // GetEmbeddingByPath 按虚拟路径取向量。
-func (d *DB) GetEmbeddingByPath(modelID, path string) ([]float32, error) {
-	var blob []byte
+// GetEmbeddingByPath 返回路径对应的向量及其资产 ID。
+//
+// 同时返回 assetID 是必要的：调用方要拿它排除自身（以图搜图）。以前调用方
+// 另外调一次 GetAssetByPath 取 ID，那次查询一旦失败就被静默忽略、ID 退化成 0，
+// 于是「排除自身」失效——线上表现为结果第一行就是查询的那张图。
+// 一次 JOIN 同时取出两者，结构上不可能不一致。
+func (d *DB) GetEmbeddingByPath(modelID, path string) ([]float32, int64, error) {
+	var (
+		blob    []byte
+		assetID int64
+	)
 	err := d.QueryRow(`
-		SELECT e.vector FROM media_embedding e
+		SELECT e.asset_id, e.vector FROM media_embedding e
 		JOIN media_asset a ON a.id = e.asset_id
-		WHERE e.model_id = ? AND a.path = ?`, modelID, normPath(path)).Scan(&blob)
+		WHERE e.model_id = ? AND a.path = ?`, modelID, normPath(path)).Scan(&assetID, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, 0, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get embedding: %w", err)
+		return nil, 0, fmt.Errorf("get embedding: %w", err)
 	}
-	return decodeVector(blob)
+	vec, err := decodeVector(blob)
+	if err != nil {
+		return nil, 0, err
+	}
+	return vec, assetID, nil
 }
 
 // IndexCounts 是索引覆盖率统计。

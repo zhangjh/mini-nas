@@ -136,18 +136,13 @@ func (s *SearchService) SimilarByPath(path string, limit int, minScore float64) 
 	}
 
 	modelID := s.engine.ModelID()
-	vec, err := s.db.GetEmbeddingByPath(modelID, path)
-	var selfID int64
-	if err == nil {
-		if asset, e := s.db.GetAssetByPath(path); e == nil {
-			selfID = asset.ID
-		}
-	} else if errors.Is(err, store.ErrNotFound) {
+	vec, selfID, err := s.db.GetEmbeddingByPath(modelID, path)
+	if errors.Is(err, store.ErrNotFound) {
 		vec, selfID, err = s.encodeOnDemand(path)
 		if err != nil {
 			return SearchResult{}, err
 		}
-	} else {
+	} else if err != nil {
 		return SearchResult{}, err
 	}
 
