@@ -184,7 +184,8 @@
 - ViT-L/14（768 维，80 GFLOPs）：质量更好，但 4.5× FLOPs 推算约 500 ms/img，14k 需 ~2 小时，超出"一万张不能几个小时"的约束。**未实测**（模型下载受阻，见风险 R5）
 - MobileCLIP2-S0：1.5 GFLOPs 很快，但文本塔是英文，必须翻译，引入误差且违背"中文原生"要求
 
-**模型文件用 git-lfs 管理**，不入 Docker 镜像。
+**模型文件不入库**，用 `scripts/setup_model.sh` 复现（理由见 §11.3），也不入 Docker 镜像，
+运行时只读挂载。
 
 ### D2 推理后端：ONNX Runtime C API + OpenVINO EP
 
