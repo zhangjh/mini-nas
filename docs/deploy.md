@@ -503,6 +503,72 @@ ufw status
 # 确保端口转发规则正确
 ```
 
+### 10.5 语义检索部署踩坑记录
+
+以下五条都是真机部署时实际撞上的，按出现概率排序。
+
+**① 容器起不来：`Unable to find group render`**
+
+```
+docker: Error response from daemon: Unable to find group render:
+no matching entries in group file
+```
+
+`/dev/dri/renderD128` 属主是 `root:render(660)`，容器进程必须带上对应 GID。
+但 Debian 镜像默认**不建** `render` 组，`group_add: render` 会被 docker 直接拒绝。
+只能用数字：
+
+```yaml
+group_add:
+  - "${RENDER_GID:-110}"
+```
+
+取值用 `stat -c %g /dev/dri/renderD128` 查。**GID 写错不会报错**，只会静默降级到 CPU。
+
+**② 语义检索整体 503：`cannot open shared object file: onnxruntime.so`**
+
+```
+Error loading ONNX shared library "onnxruntime.so": cannot open shared object file
+```
+
+从 wheel 抽出来的库名是 `libonnxruntime.so.1.24.1`，而绑定库默认按 `onnxruntime.so` 找。
+代码里已做逐级回退（显式配置 → 常见名 → 版本化名），若仍失败可显式指定：
+
+```json
+{ "ai": { "ort_lib": "/opt/ort/libonnxruntime.so.1.24.1" } }
+```
+
+**③ `apt-get update` 卡住不动**
+
+容器内 apt 会先试 IPv6，无 IPv6 路由时每个请求都要等连接超时，日志里表现为反复
+`Ign:` 重试。实测 apt update 从 98 秒降到数秒。Dockerfile 里所有 `apt-get` 都带了
+`-o Acquire::ForceIPv4=true`，自建镜像时别忘了。
+
+**④ `docker-compose up` 抛 `KeyError: 'ContainerConfig'`**
+
+compose v1（1.29.x）与 Docker Engine 25+ 不兼容，本项目镜像要求 Docker 24 以上。
+装 compose v2：
+
+```bash
+sudo apt-get install -y docker-compose-v2   # 之后用 docker compose（无连字符）
+```
+
+**⑤ 改了代码里的默认值，线上不生效**
+
+历史版本每次启动都把完整配置写回 `/data/config.json`，把当时的默认值固化成了文件值。
+现已改为只在文件不存在时生成。**存量实例需要手动处理**：
+
+```bash
+# 查看被固化的值
+python3 -c "import json;print(json.load(open('data/config.json'))['ai'])"
+# 删掉整个 ai 段，回落到代码默认值（前提是没有自定义项）
+python3 -c "
+import json; p='data/config.json'; c=json.load(open(p))
+c.pop('ai', None); json.dump(c, open(p,'w'), indent=2, ensure_ascii=False)"
+```
+
+改完重启容器。同理，`dedup`、`thumbnail` 段也可能是旧默认值的快照。
+
 ---
 
 ## 11. 安全加固
