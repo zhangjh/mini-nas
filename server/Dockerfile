@@ -8,12 +8,20 @@
 #   docker run -v $PWD/data:/data -v $PWD/server/models:/data/models:ro ...
 
 # ---- 推理运行库抽取 ----
-FROM python:3.12-slim AS ortlibs
+# 基底用 debian 而不是 python 镜像：这里只需要 wheel 里的 .so，
+# wheel 本质是 zip，借 pip 只为省掉手写索引解析。固定 cp312 tag，
+# 与实际解释器无关（onnxruntime 的 C 库不分 cp 版本）。
+FROM debian:bookworm-slim AS ortlibs
 ARG ORT_VERSION=1.24.1
 ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-pip ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 # 只装 onnxruntime-openvino：与 onnxruntime 混装会把不同版本的
 # libonnxruntime.so 放进同一目录，运行时加载哪个取决于 LD_LIBRARY_PATH 顺序。
-RUN pip install --no-cache-dir -i ${PIP_INDEX} --target /ortpkg onnxruntime-openvino==${ORT_VERSION} \
+RUN pip3 install --no-cache-dir --no-deps --only-binary=:all: \
+      --python-version 312 --break-system-packages --target /ortpkg \
+      -i ${PIP_INDEX} onnxruntime-openvino==${ORT_VERSION} \
  && mkdir -p /opt/ort \
  && cp -a /ortpkg/onnxruntime/capi/*.so* /opt/ort/ \
  && ls -la /opt/ort
