@@ -34,3 +34,14 @@ android/.cxx/
 backup/
 docs/
 gradle_temp/
+
+# 构建产物
+server/bin/
+*.exe
+*.exe~
+
+# 工具/项目数据目录
+.workbuddy-ai/
+
+# 注意：models/**/*.onnx 不在此忽略，需用 git-lfs 跟踪
+# （见 docs/design-semantic-index.md §11.3）
