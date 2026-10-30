@@ -50,8 +50,19 @@ func main() {
 	// 本地开发就会读到这条路径。
 	modelDir := resolveModelDir(cfg.AI.ModelDir, cfg.DataDir, cfg.AI.ModelID)
 
-	if err := cfg.Save(absConfigPath); err != nil {
-		log.Printf("Warning: could not save config: %v", err)
+	// 只在配置文件不存在时生成模板。
+	//
+	// 以前每次启动都把完整配置写回，会把「当时的代码默认值」固化成文件值：
+	// 之后升级改了默认值（比如检索阈值），老实例上永远不生效，而且没有任何提示
+	// ——线上就踩过一次，改了默认阈值却依然按旧值检索。
+	//
+	// 首次部署仍然要落盘：jwt_secret 是随机生成的，不落盘重启后所有 token 失效。
+	if _, statErr := os.Stat(absConfigPath); os.IsNotExist(statErr) {
+		if err := cfg.Save(absConfigPath); err != nil {
+			log.Printf("Warning: could not save config: %v", err)
+		} else {
+			log.Printf("Generated default config: %s", absConfigPath)
+		}
 	}
 
 	mountSvc := service.NewMountService(cfg.DBPath())
