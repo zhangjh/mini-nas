@@ -24,6 +24,10 @@ type Mount struct {
 	Name      string `json:"name"`
 	Path      string `json:"path"`
 	CreatedAt int64  `json:"created_at"`
+	// Local 表示 Path 是容器/进程内可直接访问的路径，不需要再经 HOST_ROOT 映射。
+	// 默认上传目录就属于这一类：它由 data_dir 派生，本来就挂在容器内，
+	// 而用户手动添加的挂载点指向宿主机路径，必须经 HOST_ROOT 前缀才能访问。
+	Local bool `json:"local,omitempty"`
 }
 
 type User struct {

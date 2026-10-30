@@ -28,25 +28,49 @@ func NewMountService(dbDir string) *MountService {
 	return s
 }
 
-func (s *MountService) AddDefaultMount(uploadDir string) {
+// AddDefaultMount 确保上传目录以一个「本地挂载」的形式存在。
+//
+// 文件读写全部走挂载点解析（ResolveMount），所以全新部署若挂载表为空，
+// 任何上传都会因 "mount not found" 失败。这里在启动时兜底创建。
+//
+// 该挂载点标记 Local，因为 uploadDir 由 data_dir 派生、在容器内可直接访问，
+// 不能再叠加 HOST_ROOT 前缀（那是给用户添加的宿主机路径用的）。
+//
+// 若已存在同路径或同名的挂载则不做任何事；返回实际生效的挂载点，供调用方打日志。
+func (s *MountService) AddDefaultMount(uploadDir string) *model.Mount {
+	abs, err := filepath.Abs(uploadDir)
+	if err != nil {
+		return nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, m := range s.mounts {
-		if m.Path == uploadDir {
-			return
+	for i, m := range s.mounts {
+		if m.Path == abs {
+			return &s.mounts[i]
 		}
 	}
 
-	abs, _ := filepath.Abs(uploadDir)
+	name := filepath.Base(abs)
+	for _, m := range s.mounts {
+		if m.Name == name {
+			// 名字被别的挂载占了，加后缀避免歧义
+			name = name + "-upload"
+			break
+		}
+	}
+
 	mount := model.Mount{
 		ID:        uuid.NewString(),
-		Name:      filepath.Base(abs),
+		Name:      name,
 		Path:      abs,
 		CreatedAt: time.Now().UnixMilli(),
+		Local:     true,
 	}
 	s.mounts = append([]model.Mount{mount}, s.mounts...)
 	s.save()
+	return &s.mounts[0]
 }
 
 func (s *MountService) List() []model.Mount {

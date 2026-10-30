@@ -50,6 +50,12 @@ func main() {
 	mountSvc := service.NewMountService(cfg.DBPath())
 	userSvc := service.NewUserService(cfg.DBPath())
 
+	// 全新部署的挂载表是空的，而所有文件读写都要先经挂载点解析，
+	// 不兜底的话首次上传必然 mount not found。
+	if m := mountSvc.AddDefaultMount(cfg.UploadDir); m != nil {
+		log.Printf("Default upload mount: %s -> %s (local)", m.Name, m.Path)
+	}
+
 	fileSvc := service.NewFileService(mountSvc, cfg.HostRoot)
 	thumbSvc := service.NewThumbnailService(cfg.ThumbCacheDir())
 

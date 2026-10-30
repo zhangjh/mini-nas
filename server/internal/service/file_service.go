@@ -67,13 +67,25 @@ func (s *FileService) hostPath(path string) string {
 	return filepath.Join(s.hostRoot, path)
 }
 
+// mountPath 把挂载点下的相对路径解析为进程内可直接访问的绝对路径。
+//
+// 用户添加的挂载点指向宿主机路径，需叠加 HOST_ROOT；而本地挂载（默认上传目录）
+// 本身就挂在容器内，叠加会得到 /host/data/files 这种不存在的路径。
+func (s *FileService) mountPath(m *model.Mount, rel string) string {
+	p := filepath.Join(m.Path, rel)
+	if m.Local {
+		return p
+	}
+	return s.hostPath(p)
+}
+
 // lockKey 返回用于文件锁的绝对路径键
 func (s *FileService) lockKey(virtualPath string) string {
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
 		return virtualPath
 	}
-	return s.hostPath(filepath.Join(mount.Path, rel))
+	return s.mountPath(mount, rel)
 }
 
 func (s *FileService) RLockFile(virtualPath string) {
@@ -111,7 +123,7 @@ func (s *FileService) AbsPath(virtualPath string) string {
 	if mount == nil {
 		return ""
 	}
-	return s.hostPath(filepath.Join(mount.Path, rel))
+	return s.mountPath(mount, rel)
 }
 
 func (s *FileService) ListDir(virtualPath string, page, pageSize int, sortBy string, sortDesc bool) (*model.FileList, error) {
@@ -124,7 +136,7 @@ func (s *FileService) ListDir(virtualPath string, page, pageSize int, sortBy str
 		return nil, os.ErrNotExist
 	}
 
-	absDir := s.hostPath(filepath.Join(mount.Path, rel))
+	absDir := s.mountPath(mount, rel)
 	return s.listDir(absDir, mountName, rel, page, pageSize, sortBy, sortDesc)
 }
 
@@ -132,7 +144,7 @@ func (s *FileService) listMounts(page, pageSize int) (*model.FileList, error) {
 	mounts := s.mountSvc.List()
 	var items []model.FileInfo
 	for _, m := range mounts {
-		info, err := os.Stat(s.hostPath(m.Path))
+		info, err := os.Stat(s.mountPath(&m, ""))
 		if err != nil {
 			continue
 		}
@@ -246,7 +258,7 @@ func (s *FileService) GetFileInfo(virtualPath string) (*model.FileInfo, error) {
 	if mount == nil {
 		return nil, os.ErrNotExist
 	}
-	abs := s.hostPath(filepath.Join(mount.Path, rel))
+	abs := s.mountPath(mount, rel)
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, err
@@ -279,7 +291,7 @@ func (s *FileService) ListTree(virtualPath string) ([]model.FileInfo, error) {
 		return nil, os.ErrNotExist
 	}
 
-	absDir := s.hostPath(filepath.Join(mount.Path, rel))
+	absDir := s.mountPath(mount, rel)
 
 	seen := make(map[string]struct{})
 	var files []model.FileInfo
@@ -350,7 +362,7 @@ func (s *FileService) Mkdir(virtualPath string) error {
 	if mount == nil {
 		return fmt.Errorf("mount not found")
 	}
-	return os.MkdirAll(s.hostPath(filepath.Join(mount.Path, rel)), 0755)
+	return os.MkdirAll(s.mountPath(mount, rel), 0755)
 }
 
 func (s *FileService) Delete(virtualPath string) error {
@@ -358,7 +370,7 @@ func (s *FileService) Delete(virtualPath string) error {
 	if mount == nil {
 		return fmt.Errorf("mount not found")
 	}
-	return os.RemoveAll(s.hostPath(filepath.Join(mount.Path, rel)))
+	return os.RemoveAll(s.mountPath(mount, rel))
 }
 
 func (s *FileService) Rename(oldPath, newPath string) error {
@@ -368,8 +380,8 @@ func (s *FileService) Rename(oldPath, newPath string) error {
 		return fmt.Errorf("mount not found")
 	}
 
-	oldAbs := s.hostPath(filepath.Join(oldMount.Path, oldRel))
-	newAbs := s.hostPath(filepath.Join(newMount.Path, newRel))
+	oldAbs := s.mountPath(oldMount, oldRel)
+	newAbs := s.mountPath(newMount, newRel)
 	dir := filepath.Dir(newAbs)
 	os.MkdirAll(dir, 0755)
 
@@ -381,7 +393,7 @@ func (s *FileService) Move(paths []string, destDir string) error {
 	if destMount == nil {
 		return fmt.Errorf("destination mount not found")
 	}
-	destAbs := s.hostPath(filepath.Join(destMount.Path, destRel))
+	destAbs := s.mountPath(destMount, destRel)
 	os.MkdirAll(destAbs, 0755)
 
 	for _, p := range paths {
@@ -389,7 +401,7 @@ func (s *FileService) Move(paths []string, destDir string) error {
 		if mount == nil {
 			continue
 		}
-		src := s.hostPath(filepath.Join(mount.Path, rel))
+		src := s.mountPath(mount, rel)
 		dst := filepath.Join(destAbs, filepath.Base(rel))
 		if err := os.Rename(src, dst); err != nil {
 			return err
@@ -403,7 +415,7 @@ func (s *FileService) Copy(srcPaths []string, destDir string) error {
 	if destMount == nil {
 		return fmt.Errorf("destination mount not found")
 	}
-	destAbs := s.hostPath(filepath.Join(destMount.Path, destRel))
+	destAbs := s.mountPath(destMount, destRel)
 	os.MkdirAll(destAbs, 0755)
 
 	for _, p := range srcPaths {
@@ -411,7 +423,7 @@ func (s *FileService) Copy(srcPaths []string, destDir string) error {
 		if mount == nil {
 			continue
 		}
-		src := s.hostPath(filepath.Join(mount.Path, rel))
+		src := s.mountPath(mount, rel)
 		dst := filepath.Join(destAbs, filepath.Base(rel))
 		if err := copyPath(src, dst); err != nil {
 			return err
@@ -426,7 +438,7 @@ func (s *FileService) WriteFile(virtualPath string, reader io.Reader) (int64, er
 		return 0, fmt.Errorf("mount not found")
 	}
 
-	abs := s.hostPath(filepath.Join(mount.Path, rel))
+	abs := s.mountPath(mount, rel)
 	dir := filepath.Dir(abs)
 	os.MkdirAll(dir, 0755)
 
@@ -476,7 +488,7 @@ func (s *FileService) StageFile(virtualPath string, reader io.Reader) (*PendingW
 		return nil, fmt.Errorf("mount not found")
 	}
 
-	abs := s.hostPath(filepath.Join(mount.Path, rel))
+	abs := s.mountPath(mount, rel)
 	if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
 		return nil, err
 	}
@@ -542,7 +554,7 @@ func (s *FileService) OpenFile(virtualPath string) (*os.File, error) {
 	if mount == nil {
 		return nil, fmt.Errorf("mount not found")
 	}
-	return os.Open(s.hostPath(filepath.Join(mount.Path, rel)))
+	return os.Open(s.mountPath(mount, rel))
 }
 
 // Exists 判断虚拟路径是否对应一个已存在的普通文件。
@@ -551,7 +563,7 @@ func (s *FileService) Exists(virtualPath string) bool {
 	if mount == nil {
 		return false
 	}
-	info, err := os.Stat(s.hostPath(filepath.Join(mount.Path, rel)))
+	info, err := os.Stat(s.mountPath(mount, rel))
 	return err == nil && !info.IsDir()
 }
 
@@ -560,7 +572,7 @@ func (s *FileService) Search(q string, virtualPath string) []model.FileInfo {
 
 	var rootDir string
 	if mount != nil {
-		rootDir = s.hostPath(filepath.Join(mount.Path, rel))
+		rootDir = s.mountPath(mount, rel)
 	} else {
 		rootDir = s.hostPath("/")
 	}
@@ -576,7 +588,7 @@ func (s *FileService) Search(q string, virtualPath string) []model.FileInfo {
 
 		// Build virtual path: find which mount this file belongs to
 		for _, m := range s.mountSvc.List() {
-			mPath := s.hostPath(m.Path)
+			mPath := s.mountPath(&m, "")
 			relPath, err := filepath.Rel(mPath, p)
 			if err == nil && !strings.HasPrefix(relPath, "..") {
 				vp := filepath.Join(m.Name, relPath)
