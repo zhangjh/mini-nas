@@ -10,10 +10,19 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/data
+      # 模型只读挂载，不进镜像（两份 ONNX 合计 718MB）。
+      - ./server/models:/data/models:ro
       - /:/host
     environment:
       - TZ=Asia/Shanghai
       - HOST_ROOT=/host
+      # onnxruntime + OpenVINO EP 运行库，由镜像构建阶段从 wheel 抽取。
+      - LD_LIBRARY_PATH=/opt/ort
+    # iGPU 直通：没有这两个配置，OpenVINO 只能跑 CPU（索引慢约 6 倍）。
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - render
     restart: unless-stopped
 
   web:

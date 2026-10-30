@@ -70,6 +70,9 @@
   <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
     {#if !contextMenu.item.is_dir}
       <button on:click={() => { dispatch('preview', contextMenu.item); contextMenu = null }}>预览</button>
+      {#if isImage(contextMenu.item.name)}
+        <button on:click={() => { dispatch('similar', contextMenu.item.path); contextMenu = null }}>找相似图片</button>
+      {/if}
     {/if}
     <button on:click={() => { dispatch('download', contextMenu.item.path); contextMenu = null }}>下载</button>
     <button on:click={() => { dispatch('rename', contextMenu.item.path); contextMenu = null }}>重命名</button>

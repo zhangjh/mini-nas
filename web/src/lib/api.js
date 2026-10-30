@@ -223,3 +223,41 @@ export function deleteMount(name) {
 export function listSystemDirs(path) {
   return request('GET', `/system/dirs?path=${encodeURIComponent(path || '/')}`)
 }
+
+// ---- 语义检索 ----
+
+export function semanticSearch(query, limit = 60, minScore = 0) {
+  return request('POST', '/search/semantic', {
+    body: JSON.stringify({ query, limit, min_score: minScore })
+  })
+}
+
+export function similarSearch(path, limit = 60, minScore = 0) {
+  return request('POST', '/search/similar', {
+    body: JSON.stringify({ path, limit, min_score: minScore })
+  })
+}
+
+export function indexStatus() {
+  return request('GET', '/index/status')
+}
+
+export function indexHealth() {
+  return request('GET', '/index/health')
+}
+
+export function startIndex(full = false) {
+  return request('POST', '/index/scan', {
+    body: JSON.stringify({ full })
+  })
+}
+
+export function cancelIndex(jobId) {
+  return request('POST', '/index/cancel', {
+    body: JSON.stringify({ job_id: jobId })
+  })
+}
+
+export function indexJob(jobId) {
+  return request('GET', `/index/job?job_id=${encodeURIComponent(jobId)}`)
+}

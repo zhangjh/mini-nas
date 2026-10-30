@@ -1,23 +1,54 @@
-FROM golang:1.22-alpine AS builder
+# 语义检索需要 CGO（onnxruntime + libjpeg-turbo），alpine + CGO_ENABLED=0 无法承载，
+# 因此基底从 alpine 换成 Debian bookworm。
+#
+# 构建：docker compose build server
+# 推理运行库（onnxruntime + OpenVINO EP）从官方 wheel 取，不自编译、不进版本控制。
 
+# ---- 运行库抽取 ----
+FROM python:3.12-slim AS ortlibs
+ARG ORT_VERSION=1.24.1
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+# 只装 onnxruntime-openvino：与 onnxruntime 混装会把不同版本的
+# libonnxruntime.so 放进同一目录，运行时加载哪个取决于 LD_LIBRARY_PATH 顺序。
+RUN pip install --no-cache-dir -i ${PIP_INDEX} --target /ortpkg onnxruntime-openvino==${ORT_VERSION} \
+ && mkdir -p /opt/ort \
+ && cp -a /ortpkg/onnxruntime/capi/*.so* /opt/ort/ \
+ && ls -la /opt/ort
+
+# ---- 构建阶段 ----
+FROM golang:1.22-bookworm AS builder
 WORKDIR /build
-
 ENV GOPROXY=https://goproxy.cn,direct
-
+# libjpeg62-turbo-dev 提供 jpeglib.h，供 internal/imgcodec 的 DCT 降采样路径使用。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libjpeg62-turbo-dev \
+ && rm -rf /var/lib/apt/lists/*
 COPY server/go.mod server/go.sum ./
 RUN go mod download
-
 COPY server/ .
+# -tags libjpeg 启用 libjpeg-turbo 解码；cgo 约束由 CGO_ENABLED=1 自动满足。
+RUN CGO_ENABLED=1 go build -tags libjpeg -ldflags="-s -w" -o mini-nas-server ./cmd/server
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o mini-nas-server ./cmd/server
+# ---- 运行阶段 ----
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates tzdata libjpeg62-turbo \
+ && rm -rf /var/lib/apt/lists/*
 
-FROM alpine:3.19
+# iGPU 用户态驱动。装不上就退化为 CPU 推理（索引慢约 6 倍），
+# 但不让整个镜像构建失败——/api/index/health 会暴露 device，运维能立刻看到降级。
+RUN apt-get update \
+ && ( apt-get install -y --no-install-recommends intel-opencl-icd libze-intel-gpu1 \
+      || apt-get install -y --no-install-recommends intel-opencl-icd intel-level-zero-gpu libze1 \
+      || echo "WARN: iGPU 用户态驱动未安装，语义索引将使用 CPU" ) \
+ && rm -rf /var/lib/apt/lists/*
 
-RUN apk add --no-cache ca-certificates ffmpeg tzdata
-RUN adduser -D -h /data -s /sbin/nologin mini-nas
+COPY --from=ortlibs /opt/ort /opt/ort
+ENV LD_LIBRARY_PATH=/opt/ort
+
+RUN useradd --system --create-home --home-dir /data --shell /usr/sbin/nologin mini-nas
 
 WORKDIR /app
-
 COPY --from=builder /build/mini-nas-server .
 
 RUN mkdir -p /data /host && chown -R mini-nas:mini-nas /data /app && chmod 755 /host

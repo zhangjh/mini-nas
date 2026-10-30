@@ -2,5 +2,50 @@
   "port": 8080,
   "data_dir": "./data",
   "upload_dir": "data/files",
-  "jwt_secret": "1792a26abd4f4f6315644d151d1b6e913b764e6ac83c29ffe77d5ec400a0bacf"
+  "jwt_secret": "1792a26abd4f4f6315644d151d1b6e913b764e6ac83c29ffe77d5ec400a0bacf",
+  "dedup": {
+    "enabled": true,
+    "skip_upload_duplicate": true,
+    "large_file_threshold": 52428800,
+    "partial_hash_bytes": 65536,
+    "max_scan_files": 500000,
+    "hash_workers": 4
+  },
+  "thumbnail": {
+    "max_size": 320,
+    "jpeg_quality": 80,
+    "validate_mtime": true,
+    "backfill_workers": 4,
+    "prune_orphans": true
+  },
+  "ai": {
+    "enabled": true,
+    "model_dir": "./models/cn-clip-vit-b16",
+    "model_id": "cn-clip-vit-b16",
+    "device": "GPU",
+    "precision": "FP16",
+    "ort_lib": "",
+    "threads": 1,
+    "batch_size": 64,
+    "throttle_ms": 0,
+    "prefer_thumbnail": true,
+    "writeback_thumbnail": true,
+    "selftest": true,
+    "text_cache_size": 256,
+    "search": {
+      "default_limit": 50,
+      "text_min_score": 0.18,
+      "image_min_score": 0.75
+    },
+    "extensions": [
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".webp",
+      ".bmp",
+      ".gif",
+      ".heic",
+      ".heif"
+    ]
+  }
 }

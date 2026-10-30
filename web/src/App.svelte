@@ -13,6 +13,7 @@
   import FilePreview from './components/FilePreview.svelte'
   import UploadDialog from './components/UploadDialog.svelte'
   import StorageSettings from './components/StorageSettings.svelte'
+  import SemanticSearch from './components/SemanticSearch.svelte'
 
   let authed = false
   let loading = true
@@ -20,6 +21,9 @@
   let searchTimer
   let history = []
   let historyIdx = -1
+  // 语义检索面板：seed 非空表示以图搜图（来自文件网格的「找相似图片」）。
+  let showSemantic = false
+  let semanticSeed = ''
 
   isAuthenticated.subscribe(v => authed = v)
 
@@ -205,6 +209,11 @@
     loadDir()
   }
 
+  function openSemantic(seed = '') {
+    semanticSeed = seed
+    showSemantic = true
+  }
+
   function handleSelectAll() {
     $selectedFiles = (() => {
       const s = new Set($selectedFiles)
@@ -249,6 +258,14 @@
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           上传
+        </button>
+        <button
+          class="btn btn-ghost btn-sm"
+          on:click={() => openSemantic()}
+          title="用中文描述找图片"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M3 12h3"/><path d="M18 12h3"/><circle cx="12" cy="12" r="4"/></svg>
+          智能检索
         </button>
         <button class="btn btn-ghost btn-sm" on:click={() => $showSettings = true}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -314,6 +331,7 @@
             on:preview={e => handlePreview(e.detail)}
             on:download={e => downloadFile(e.detail)}
             on:delete={e => handleDelete(e.detail)}
+            on:similar={e => openSemantic(e.detail)}
             on:rename={e => { const n = prompt('新名称:', e.detail.split('/').pop()); if (n) handleRename(e.detail, n) }}
           />
         </div>
@@ -332,6 +350,7 @@
           on:preview={e => handlePreview(e.detail)}
           on:download={e => downloadFile(e.detail)}
           on:delete={e => handleDelete(e.detail)}
+          on:similar={e => openSemantic(e.detail)}
           on:rename={e => { const n = prompt('新名称:', e.detail.split('/').pop()); if (n) handleRename(e.detail, n) }}
         />
       {:else}
@@ -369,6 +388,14 @@
 
   {#if $showSettings}
     <StorageSettings on:changed={handleMountsChanged} on:close={() => $showSettings = false} />
+  {/if}
+
+  {#if showSemantic}
+    <SemanticSearch
+      seed={semanticSeed}
+      on:close={() => { showSemantic = false; semanticSeed = '' }}
+      on:preview={e => { showSemantic = false; semanticSeed = ''; handlePreview(e.detail) }}
+    />
   {/if}
 {/if}
 
