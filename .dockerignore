@@ -17,6 +17,11 @@ server/data
 server/mini-nas-server
 server/*.tmp
 
+# PyTorch 原始权重（719MB）与本地备份目录，只服务 setup_model.sh 与人工回滚，
+# 与镜像无关。漏掉这条时构建上下文实测 753MB，几乎全耗在这里。
+.models-src
+backup
+
 # 杂项
 *.log
 *.md
