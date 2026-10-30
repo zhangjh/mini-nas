@@ -88,8 +88,18 @@ type AIConfig struct {
 
 // AISearchConfig 是检索默认值与分数阈值。
 //
-// 图文余弦与图图余弦分布完全不同：图文匹配通常 0.20~0.35，图图相似 0.85+
-// 才算同款，所以阈值必须分开配置。
+// 图文余弦与图图余弦分布完全不同：图图相似 0.85+ 才算同款，图文匹配的绝对值
+// 则集中得多，阈值必须分开配置。
+//
+// 图文阈值 0.38 来自真机实测（13,978 张照片库，CN-CLIP ViT-B/16 + OpenVINO GPU）：
+//
+//	真实命中（"海边日落"）      top-1 0.437  top-25 0.420
+//	库中不存在（"雪山顶上的企鹅"）top-1 0.379  top-25 0.353
+//	库中不存在（"航空母舰"）     top-1 0.402
+//
+// 注意这与早期设计里按 OpenAI CLIP 经验估的「0.20~0.35、无关 <0.10」相差很大，
+// 那个区间从未在本模型上实测过。0.18 会让完全不相关的查询也返回整页结果。
+// 排序是可靠的，绝对分数不可靠，所以阈值只能卡在负样本最高分之上。
 type AISearchConfig struct {
 	DefaultLimit  int     `json:"default_limit"`
 	TextMinScore  float64 `json:"text_min_score"`
@@ -124,7 +134,7 @@ func (a *AIConfig) applyDefaults() {
 		a.Search.DefaultLimit = 50
 	}
 	if a.Search.TextMinScore <= 0 {
-		a.Search.TextMinScore = 0.18
+		a.Search.TextMinScore = 0.38
 	}
 	if a.Search.ImageMinScore <= 0 {
 		a.Search.ImageMinScore = 0.75
@@ -182,7 +192,7 @@ func Load(path string) (*Config, error) {
 			TextCacheSize:      256,
 			Search: AISearchConfig{
 				DefaultLimit:  50,
-				TextMinScore:  0.18,
+				TextMinScore:  0.38,
 				ImageMinScore: 0.75,
 			},
 			Extensions: DefaultAIExtensions(),

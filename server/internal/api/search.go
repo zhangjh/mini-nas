@@ -22,7 +22,7 @@ func NewSearchHandler(svc *service.SearchService) *SearchHandler {
 
 // Semantic 文搜图：POST /api/search/semantic
 //
-//	{"query": "海边日落", "limit": 50, "min_score": 0.18}
+//	{"query": "海边日落", "limit": 50, "min_score": 0.38}
 func (h *SearchHandler) Semantic(w http.ResponseWriter, r *http.Request) {
 	if !h.ensureAvailable(w) {
 		return

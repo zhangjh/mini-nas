@@ -34,7 +34,7 @@
     "text_cache_size": 256,
     "search": {
       "default_limit": 50,
-      "text_min_score": 0.18,
+      "text_min_score": 0.38,
       "image_min_score": 0.75
     },
     "extensions": [
