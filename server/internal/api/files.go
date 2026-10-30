@@ -6,10 +6,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	vpath "path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/zhangjh/mini-nas/server/internal/config"
 	"github.com/zhangjh/mini-nas/server/internal/model"
 	"github.com/zhangjh/mini-nas/server/internal/service"
 )
@@ -17,11 +20,25 @@ import (
 type FileHandler struct {
 	fileSvc  *service.FileService
 	thumbSvc *service.ThumbnailService
+	hashSvc  *service.HashService
+	dedupCfg config.DedupConfig
 	hostRoot string // 宿主机根目录在容器内的映射路径，为空则直接用原始路径
 }
 
-func NewFileHandler(fileSvc *service.FileService, thumbSvc *service.ThumbnailService, hostRoot string) *FileHandler {
-	return &FileHandler{fileSvc: fileSvc, thumbSvc: thumbSvc, hostRoot: hostRoot}
+func NewFileHandler(
+	fileSvc *service.FileService,
+	thumbSvc *service.ThumbnailService,
+	hashSvc *service.HashService,
+	dedupCfg config.DedupConfig,
+	hostRoot string,
+) *FileHandler {
+	return &FileHandler{
+		fileSvc:  fileSvc,
+		thumbSvc: thumbSvc,
+		hashSvc:  hashSvc,
+		dedupCfg: dedupCfg,
+		hostRoot: hostRoot,
+	}
 }
 
 func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -97,21 +114,65 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	targetPath := filepath.Join(path, header.Filename)
-	written, err := h.fileSvc.WriteFile(targetPath, file)
+	targetPath := vpath.Join(path, header.Filename)
+
+	// 先落临时文件并算出 MD5：去重判定需要完整内容指纹，只有读完全部
+	// 字节才能得到。暂存/提交分离避免了重复读取上传流。
+	stage, err := h.fileSvc.StageFile(targetPath, file)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
 			OK: false, Error: err.Error(),
 		})
 		return
 	}
+	defer stage.Discard()
+
+	// 内容去重：仅在目标路径原本不存在时生效。覆盖同名文件属于正常重传，
+	// 不应被判定为「重复」。
+	if h.dedupCfg.Enabled && h.dedupCfg.SkipUploadDuplicate &&
+		h.hashSvc != nil && !h.fileSvc.Exists(targetPath) {
+		if existing, ok := h.hashSvc.FindDuplicate(stage.MD5, stage.Size, targetPath); ok {
+			stage.Discard()
+			mtime := time.Now().UnixMilli()
+			if err := h.hashSvc.RecordSkip(targetPath, stage.MD5, stage.Size, mtime, existing); err != nil {
+				log.Printf("record dedup skip for %s: %v", targetPath, err)
+			}
+			writeJSON(w, http.StatusOK, model.APIResponse{
+				OK: true,
+				Data: map[string]interface{}{
+					"size":         stage.Size,
+					"path":         targetPath,
+					"name":         header.Filename,
+					"md5":          stage.MD5,
+					"duplicate":    true,
+					"duplicate_of": existing,
+				},
+			})
+			return
+		}
+	}
+
+	if err := stage.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, model.APIResponse{
+			OK: false, Error: err.Error(),
+		})
+		return
+	}
+
+	if h.hashSvc != nil {
+		_ = h.hashSvc.Record(targetPath, stage.MD5, stage.Size, time.Now().UnixMilli())
+		// 该路径此前可能登记过「已去重未落盘」，现在真实落盘了，记录作废。
+		_ = h.hashSvc.ForgetSkip(targetPath)
+	}
 
 	writeJSON(w, http.StatusOK, model.APIResponse{
 		OK: true,
 		Data: map[string]interface{}{
-			"size":  written,
-			"path":  targetPath,
-			"name":  header.Filename,
+			"size":      stage.Size,
+			"path":      targetPath,
+			"name":      header.Filename,
+			"md5":       stage.MD5,
+			"duplicate": false,
 		},
 	})
 }
@@ -248,7 +309,24 @@ func (h *FileHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	h.invalidateFingerprints(req.Path)
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
+}
+
+// invalidateFingerprints 在路径发生删除/改名/移动后清除相关的内容指纹。
+//
+// 指纹表以虚拟路径为键，路径一变旧记录就失去意义；留着会让上传去重
+// 命中一个已不存在的「原件」。按前缀删除同时覆盖目录删除的情况。
+func (h *FileHandler) invalidateFingerprints(virtualPath string) {
+	if h.hashSvc == nil {
+		return
+	}
+	if err := h.hashSvc.ForgetUnder(virtualPath); err != nil {
+		log.Printf("forget fingerprints under %s: %v", virtualPath, err)
+	}
+	if err := h.hashSvc.ForgetSkip(virtualPath); err != nil {
+		log.Printf("forget skip %s: %v", virtualPath, err)
+	}
 }
 
 func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +348,7 @@ func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	h.invalidateFingerprints(req.Path)
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }
 
@@ -289,6 +368,9 @@ func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
 			OK: false, Error: err.Error(),
 		})
 		return
+	}
+	for _, p := range req.Paths {
+		h.invalidateFingerprints(p)
 	}
 	writeJSON(w, http.StatusOK, model.APIResponse{OK: true})
 }

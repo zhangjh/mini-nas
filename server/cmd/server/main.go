@@ -15,6 +15,7 @@ import (
 	"github.com/zhangjh/mini-nas/server/internal/api"
 	"github.com/zhangjh/mini-nas/server/internal/config"
 	"github.com/zhangjh/mini-nas/server/internal/service"
+	"github.com/zhangjh/mini-nas/server/internal/store"
 )
 
 func main() {
@@ -52,7 +53,33 @@ func main() {
 	fileSvc := service.NewFileService(mountSvc, cfg.HostRoot)
 	thumbSvc := service.NewThumbnailService(cfg.ThumbCacheDir())
 
-	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc, userSvc)
+	db, err := store.Open(cfg.DBPath())
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// 后台任务不跨进程恢复，重启后把残留的 RUNNING 任务标记为失败，
+	// 否则前端会一直看到「运行中」。
+	if n, err := db.FailStaleJobs("服务重启，任务已中断"); err != nil {
+		log.Printf("Warning: could not clean stale jobs: %v", err)
+	} else if n > 0 {
+		log.Printf("Marked %d stale job(s) as failed", n)
+	}
+
+	hashSvc := service.NewHashService(db, fileSvc.AbsPath)
+	fileSvc.SetSkipIndex(hashSvc)
+
+	dedupOpts := service.DedupOptions{
+		LargeFileThreshold: cfg.Dedup.LargeFileThreshold,
+		PartialHashBytes:   cfg.Dedup.PartialHashBytes,
+		MaxScanFiles:       cfg.Dedup.MaxScanFiles,
+		HashWorkers:        cfg.Dedup.HashWorkers,
+		ExcludePaths:       excludedPaths(cfg),
+	}
+	dedupSvc := service.NewDedupService(db, mountSvc, hashSvc, dedupOpts, cfg.TrashDir())
+
+	apiRouter := api.NewRouter(cfg, fileSvc, thumbSvc, mountSvc, userSvc, hashSvc, dedupSvc)
 	staticSrv := spaFallback(staticHandler())
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -93,4 +120,18 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 	log.Println("Server stopped")
+}
+
+// excludedPaths 返回不参与去重扫描的目录（服务端自身产生的数据）。
+//
+// 注意不能把 UploadDir 排除掉——它是默认挂载点，属于用户数据。
+func excludedPaths(cfg *config.Config) []string {
+	candidates := []string{cfg.ThumbCacheDir(), cfg.TrashDir(), cfg.DBPath()}
+	out := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if abs, err := filepath.Abs(c); err == nil {
+			out = append(out, abs)
+		}
+	}
+	return out
 }

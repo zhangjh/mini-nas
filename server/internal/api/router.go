@@ -9,7 +9,15 @@ import (
 	"github.com/zhangjh/mini-nas/server/internal/service"
 )
 
-func NewRouter(cfg *config.Config, fileSvc *service.FileService, thumbSvc *service.ThumbnailService, mountSvc *service.MountService, userSvc *service.UserService) http.Handler {
+func NewRouter(
+	cfg *config.Config,
+	fileSvc *service.FileService,
+	thumbSvc *service.ThumbnailService,
+	mountSvc *service.MountService,
+	userSvc *service.UserService,
+	hashSvc *service.HashService,
+	dedupSvc *service.DedupService,
+) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)
@@ -25,8 +33,9 @@ func NewRouter(cfg *config.Config, fileSvc *service.FileService, thumbSvc *servi
 
 	authM := NewAuthMiddleware(cfg.JWTSecret)
 	authH := NewAuthHandler(authM, userSvc)
-	fileH := NewFileHandler(fileSvc, thumbSvc, cfg.HostRoot)
+	fileH := NewFileHandler(fileSvc, thumbSvc, hashSvc, cfg.Dedup, cfg.HostRoot)
 	mountH := NewMountHandler(mountSvc)
+	dedupH := NewDedupHandler(dedupSvc, hashSvc, cfg.Dedup.Enabled)
 
 	r.Get("/api/auth/status", authH.Status)
 	r.Post("/api/auth/login", authH.Login)
@@ -56,6 +65,16 @@ func NewRouter(cfg *config.Config, fileSvc *service.FileService, thumbSvc *servi
 		r.Post("/mounts", mountH.Create)
 		r.Put("/mounts", mountH.Update)
 		r.Delete("/mounts", mountH.Delete)
+
+		// 内容去重
+		r.Post("/dedup/scan", dedupH.Scan)
+		r.Get("/dedup/status", dedupH.Status)
+		r.Get("/dedup/jobs", dedupH.Jobs)
+		r.Post("/dedup/cancel", dedupH.Cancel)
+		r.Get("/dedup/groups", dedupH.Groups)
+		r.Post("/dedup/resolve", dedupH.Resolve)
+		r.Get("/dedup/stats", dedupH.Stats)
+		r.Get("/dedup/skips", dedupH.Skips)
 	})
 
 	return r

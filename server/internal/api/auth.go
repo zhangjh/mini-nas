@@ -9,8 +9,8 @@ import (
 )
 
 type AuthHandler struct {
-	auth     *AuthMiddleware
-	userSvc  *service.UserService
+	auth    *AuthMiddleware
+	userSvc *service.UserService
 }
 
 func NewAuthHandler(auth *AuthMiddleware, userSvc *service.UserService) *AuthHandler {

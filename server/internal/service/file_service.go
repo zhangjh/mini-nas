@@ -1,9 +1,12 @@
 package service
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,14 +20,43 @@ type fileLock struct {
 	mu sync.RWMutex
 }
 
+// virtualJoin 拼接虚拟路径。
+//
+// 虚拟路径是 API 契约的一部分，统一使用 "/"：客户端（Android/Web）传的是
+// 正斜杠，容器内 filepath.Join 也是正斜杠，只有 Windows 开发环境会给出反斜杠。
+// 用 path.Join 而非 filepath.Join 可让三种环境行为一致。
+func virtualJoin(elem ...string) string {
+	parts := make([]string, len(elem))
+	for i, e := range elem {
+		// filepath.Rel 在 Windows 下返回反斜杠，先归一化再拼接。
+		parts[i] = filepath.ToSlash(e)
+	}
+	return path.Join(parts...)
+}
+
+// SkipIndex 提供「内容已去重、未落盘」的虚拟条目，用于补齐目录树视图。
+//
+// 去重跳过是服务端行为，文件系统上并不存在对应文件；如果 ListTree 不把它们
+// 补进来，同步客户端在 manifest 为空时会把这些文件重传一遍。
+type SkipIndex interface {
+	ListSkips(prefix string) ([]model.DedupSkip, error)
+	VerifySkipTarget(skip *model.DedupSkip) bool
+}
+
 type FileService struct {
-	mountSvc *MountService
-	hostRoot string // 宿主机根目录在容器内的映射路径，为空则直接用原始路径
+	mountSvc  *MountService
+	hostRoot  string // 宿主机根目录在容器内的映射路径，为空则直接用原始路径
 	fileLocks sync.Map
+	skipIndex SkipIndex
 }
 
 func NewFileService(mountSvc *MountService, hostRoot string) *FileService {
 	return &FileService{mountSvc: mountSvc, hostRoot: hostRoot}
+}
+
+// SetSkipIndex 注入去重跳过记录的查询能力。未注入时 ListTree 只返回真实文件。
+func (s *FileService) SetSkipIndex(idx SkipIndex) {
+	s.skipIndex = idx
 }
 
 // hostPath 将宿主机路径映射为容器内实际路径
@@ -148,7 +180,7 @@ func (s *FileService) listDir(absDir, mountName, rel string, page, pageSize int,
 		if err != nil {
 			continue
 		}
-		virtualPath := filepath.Join(mountName, rel, entry.Name())
+		virtualPath := virtualJoin(mountName, rel, entry.Name())
 		files = append(files, model.FileInfo{
 			Name:    entry.Name(),
 			Path:    virtualPath,
@@ -191,7 +223,7 @@ func (s *FileService) listDir(absDir, mountName, rel string, page, pageSize int,
 		files = files[start:end]
 	}
 
-	virtualBase := filepath.Join(mountName, rel)
+	virtualBase := virtualJoin(mountName, rel)
 	return &model.FileList{
 		Items:    files,
 		Total:    total,
@@ -235,6 +267,10 @@ func (s *FileService) GetFileInfo(virtualPath string) (*model.FileInfo, error) {
 // Android sync client to skip files that already exist on the server when
 // the local manifest is empty (e.g., first sync, or task recreated).
 //
+// 内容去重命中时服务端不落盘，磁盘上并没有对应文件，因此这里会把
+// dedup_skip 中的虚拟条目一并返回（携带原始大小）。客户端现有的
+// 「路径 + 大小一致则跳过」逻辑无需改动即可避免重传。
+//
 // If the directory does not exist yet, an empty slice is returned (nothing
 // has been synced yet).
 func (s *FileService) ListTree(virtualPath string) ([]model.FileInfo, error) {
@@ -245,39 +281,67 @@ func (s *FileService) ListTree(virtualPath string) ([]model.FileInfo, error) {
 
 	absDir := s.hostPath(filepath.Join(mount.Path, rel))
 
-	if _, err := os.Stat(absDir); err != nil {
-		if os.IsNotExist(err) {
-			return []model.FileInfo{}, nil
+	seen := make(map[string]struct{})
+	var files []model.FileInfo
+
+	if _, err := os.Stat(absDir); err == nil {
+		walkErr := filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil // skip unreadable entries
+			}
+			if info.IsDir() {
+				return nil
+			}
+			relToWalk, err := filepath.Rel(absDir, p)
+			if err != nil {
+				return nil
+			}
+			virtualFile := virtualJoin(mountName, rel, relToWalk)
+			seen[virtualFile] = struct{}{}
+			files = append(files, model.FileInfo{
+				Name:    info.Name(),
+				Path:    virtualFile,
+				Size:    info.Size(),
+				IsDir:   false,
+				ModTime: info.ModTime().UnixMilli(),
+				Mode:    info.Mode(),
+			})
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
 		}
+	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 
-	var files []model.FileInfo
-	err := filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries
+	// 补入去重跳过的虚拟条目。
+	if s.skipIndex != nil {
+		base := virtualJoin(mountName, rel)
+		skips, err := s.skipIndex.ListSkips(base)
+		if err == nil {
+			for i := range skips {
+				skip := &skips[i]
+				if _, ok := seen[skip.Path]; ok {
+					continue
+				}
+				// 原件已消失的跳过记录不可再用，跳过以免误导客户端。
+				if !s.skipIndex.VerifySkipTarget(skip) {
+					continue
+				}
+				files = append(files, model.FileInfo{
+					Name:    filepath.Base(skip.Path),
+					Path:    skip.Path,
+					Size:    skip.Size,
+					IsDir:   false,
+					ModTime: skip.MTime,
+					Mode:    0644,
+				})
+			}
 		}
-		if info.IsDir() {
-			return nil
-		}
-		relToWalk, err := filepath.Rel(absDir, p)
-		if err != nil {
-			return nil
-		}
-		virtualFile := filepath.Join(mountName, rel, relToWalk)
-		files = append(files, model.FileInfo{
-			Name:    info.Name(),
-			Path:    virtualFile,
-			Size:    info.Size(),
-			IsDir:   false,
-			ModTime: info.ModTime().UnixMilli(),
-			Mode:    info.Mode(),
-		})
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
+
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil
 }
 
@@ -391,12 +455,104 @@ func (s *FileService) WriteFile(virtualPath string, reader io.Reader) (int64, er
 	return written, nil
 }
 
+// PendingWrite 是一次已落盘到临时文件、但尚未提交到目标路径的上传。
+//
+// 引入它的目的是让上传路径可以在「写完整个文件」之后再决定是否落盘：
+// 内容去重需要完整 MD5，而 MD5 只有读完全部字节才能算出。把「暂存」与
+// 「提交」拆开，就能在不重复读流的前提下做去重判定。
+type PendingWrite struct {
+	svc         *FileService
+	virtualPath string
+	absPath     string
+	tmpPath     string
+	MD5         string
+	Size        int64
+}
+
+// StageFile 把 reader 的内容写入目标路径同目录下的临时文件，并计算 MD5。
+func (s *FileService) StageFile(virtualPath string, reader io.Reader) (*PendingWrite, error) {
+	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
+	if mount == nil {
+		return nil, fmt.Errorf("mount not found")
+	}
+
+	abs := s.hostPath(filepath.Join(mount.Path, rel))
+	if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
+		return nil, err
+	}
+
+	tmpPath := fmt.Sprintf("%s.tmp.%d", abs, time.Now().UnixNano())
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return nil, err
+	}
+
+	digest := md5.New()
+	written, copyErr := io.Copy(io.MultiWriter(f, digest), reader)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	if copyErr != nil {
+		os.Remove(tmpPath)
+		return nil, copyErr
+	}
+	if syncErr != nil {
+		os.Remove(tmpPath)
+		return nil, syncErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return nil, closeErr
+	}
+
+	return &PendingWrite{
+		svc:         s,
+		virtualPath: virtualPath,
+		absPath:     abs,
+		tmpPath:     tmpPath,
+		MD5:         hex.EncodeToString(digest.Sum(nil)),
+		Size:        written,
+	}, nil
+}
+
+// Commit 把临时文件原子地移动到目标路径。
+func (p *PendingWrite) Commit() error {
+	p.svc.LockFile(p.virtualPath)
+	defer p.svc.UnlockFile(p.virtualPath)
+
+	if err := os.Rename(p.tmpPath, p.absPath); err != nil {
+		os.Remove(p.tmpPath)
+		return err
+	}
+	p.tmpPath = ""
+	return nil
+}
+
+// Discard 丢弃暂存内容。已提交或已丢弃时是空操作。
+func (p *PendingWrite) Discard() {
+	if p.tmpPath == "" {
+		return
+	}
+	os.Remove(p.tmpPath)
+	p.tmpPath = ""
+}
+
 func (s *FileService) OpenFile(virtualPath string) (*os.File, error) {
 	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
 	if mount == nil {
 		return nil, fmt.Errorf("mount not found")
 	}
 	return os.Open(s.hostPath(filepath.Join(mount.Path, rel)))
+}
+
+// Exists 判断虚拟路径是否对应一个已存在的普通文件。
+func (s *FileService) Exists(virtualPath string) bool {
+	mount, _, rel := s.mountSvc.ResolveMount(virtualPath)
+	if mount == nil {
+		return false
+	}
+	info, err := os.Stat(s.hostPath(filepath.Join(mount.Path, rel)))
+	return err == nil && !info.IsDir()
 }
 
 func (s *FileService) Search(q string, virtualPath string) []model.FileInfo {
